@@ -1,0 +1,26 @@
+services:
+  # ──────────────────────────────────────────────────────────────────────────
+  # frontend-dev
+  #   Vite-only dev server (no Tauri / no display required).
+  #   Use this to work on the React UI in a regular browser at :1420.
+  #   Tauri-specific features (file exports, native menus, …) won't work here;
+  #   use the full devcontainer or a local install for those.
+  # ──────────────────────────────────────────────────────────────────────────
+  frontend-dev:
+    profiles: ["web"]
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    user: "1000:1000"
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - node_modules:/workspace/node_modules
+    ports:
+      - "1420:1420"
+    environment:
+      - NODE_ENV=development
+    command: sh -c "npm install && npm run dev:web -- --host 0.0.0.0"
+
+volumes:
+  node_modules:

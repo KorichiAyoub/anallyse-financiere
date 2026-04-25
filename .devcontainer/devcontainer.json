@@ -1,0 +1,42 @@
+{
+  "name": "Analyse Financière – Dev Container",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+
+  "forwardPorts": [1420],
+  "portsAttributes": {
+    "1420": { "label": "Vite Dev Server", "onAutoForward": "openBrowser" }
+  },
+
+  "postCreateCommand": "npm install",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "dbaeumer.vscode-eslint",
+        "bradlc.vscode-tailwindcss",
+        "esbenp.prettier-vscode",
+        "tauri-apps.tauri-vscode"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+        "[rust]": { "editor.defaultFormatter": "rust-lang.rust-analyzer" },
+        "rust-analyzer.cargo.buildScripts.enable": true
+      }
+    }
+  },
+
+  "remoteUser": "dev",
+
+  // For full Tauri desktop builds you need an X11 display (Linux host):
+  //   docker run --env DISPLAY=$DISPLAY --volume /tmp/.X11-unix:/tmp/.X11-unix ...
+  // For frontend-only dev (no display needed) run: npm run dev
+  // and open http://localhost:1420 in your browser.
+  "runArgs": []
+}
