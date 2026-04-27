@@ -30,3 +30,23 @@ export interface ImportRow {
   year: number;
   value: number | null;
 }
+
+export interface Company {
+  id: number;
+  name: string;
+  nif: string;
+  rc: string;
+  capital: number;
+  activite: string;
+  wilaya: string;
+  is_default: boolean;
+}
+
+export interface CompanyInput {
+  name: string;
+  nif: string;
+  rc: string;
+  capital: number;
+  activite: string;
+  wilaya: string;
+}

@@ -2,7 +2,7 @@ mod db;
 mod models;
 mod compute;
 
-use models::{FinancialEntry, SheetData, ImportRow};
+use models::{Company, CompanyInput, FinancialEntry, SheetData, ImportRow};
 use once_cell::sync::OnceCell;
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -20,8 +20,9 @@ fn get_conn() -> std::sync::MutexGuard<'static, Connection> {
 #[tauri::command]
 fn get_sheet_data(sheet_type: String) -> Result<SheetData, String> {
     let conn = get_conn();
+    let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
 
-    let years = db::get_years(&conn).map_err(|e| e.to_string())?;
+    let years = db::get_years(&conn, company_id).map_err(|e| e.to_string())?;
 
     // Load all entries for this sheet
     let mut stmt = conn.prepare(
@@ -47,7 +48,7 @@ fn get_sheet_data(sheet_type: String) -> Result<SheetData, String> {
         .filter_map(|r| r.ok()).collect();
 
     // Load stored values for this sheet
-    let raw_values = db::get_all_values(&conn, &sheet_type).map_err(|e| e.to_string())?;
+    let raw_values = db::get_all_values(&conn, &sheet_type, company_id).map_err(|e| e.to_string())?;
     // Build map: entry_id -> year -> value
     let mut val_map: HashMap<i64, HashMap<i32, Option<f64>>> = HashMap::new();
     for (eid, yr, v) in raw_values {
@@ -60,7 +61,7 @@ fn get_sheet_data(sheet_type: String) -> Result<SheetData, String> {
         .map(|e| (e.0, e.8.clone().unwrap(), e.9.clone().unwrap()))
         .collect();
 
-    let computed = compute::compute_all(&total_entries, &years, &conn);
+    let computed = compute::compute_all(&total_entries, &years, company_id, &conn);
 
     let entries: Vec<FinancialEntry> = raw_entries.into_iter().map(|e| {
         let (id, label, st, parent_id, level, order_index, is_total, is_section_header, entry_key, formula) = e;
@@ -87,33 +88,36 @@ fn get_sheet_data(sheet_type: String) -> Result<SheetData, String> {
 #[tauri::command]
 fn get_years() -> Result<Vec<i32>, String> {
     let conn = get_conn();
-    db::get_years(&conn).map_err(|e| e.to_string())
+    let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
+    db::get_years(&conn, company_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn update_value(entry_id: i64, year: i32, value: Option<f64>) -> Result<(), String> {
     let conn = get_conn();
-    db::upsert_value(&conn, entry_id, year, value).map_err(|e| e.to_string())
+    let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
+    db::upsert_value(&conn, entry_id, company_id, year, value).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn add_year(year: i32) -> Result<(), String> {
     let conn = get_conn();
-    db::add_year(&conn, year).map_err(|e| e.to_string())
+    let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
+    db::add_year(&conn, company_id, year).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn import_values(rows: Vec<ImportRow>, sheet_type: String) -> Result<usize, String> {
     let conn = get_conn();
+    let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
     let mut count = 0;
 
     for row in &rows {
         let id_opt = db::get_entry_id_by_label(&conn, &sheet_type, &row.label)
             .map_err(|e| e.to_string())?;
         if let Some(id) = id_opt {
-            // Ensure year exists
-            db::add_year(&conn, row.year).map_err(|e| e.to_string())?;
-            db::upsert_value(&conn, id, row.year, row.value).map_err(|e| e.to_string())?;
+            db::add_year(&conn, company_id, row.year).map_err(|e| e.to_string())?;
+            db::upsert_value(&conn, id, company_id, row.year, row.value).map_err(|e| e.to_string())?;
             count += 1;
         }
     }
@@ -127,6 +131,95 @@ fn save_file(app: tauri::AppHandle, filename: String, data: Vec<u8>) -> Result<S
     let path = download_dir.join(&filename);
     std::fs::write(&path, &data).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
+}
+
+// ─── PIN Commands ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn has_pin() -> bool {
+    let conn = get_conn();
+    db::has_pin(&conn)
+}
+
+#[tauri::command]
+fn setup_pin(pin: String) -> Result<(), String> {
+    let conn = get_conn();
+    db::setup_pin(&conn, &pin).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn verify_pin(pin: String) -> Result<bool, String> {
+    let conn = get_conn();
+    db::verify_pin(&conn, &pin).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn change_pin(old_pin: String, new_pin: String) -> Result<bool, String> {
+    let conn = get_conn();
+    let ok = db::verify_pin(&conn, &old_pin).map_err(|e| e.to_string())?;
+    if ok {
+        db::setup_pin(&conn, &new_pin).map_err(|e| e.to_string())?;
+    }
+    Ok(ok)
+}
+
+#[tauri::command]
+fn remove_pin(pin: String) -> Result<bool, String> {
+    let conn = get_conn();
+    let ok = db::verify_pin(&conn, &pin).map_err(|e| e.to_string())?;
+    if ok {
+        db::remove_pin(&conn).map_err(|e| e.to_string())?;
+    }
+    Ok(ok)
+}
+
+// ─── Company Commands ──────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn list_companies() -> Result<Vec<Company>, String> {
+    let conn = get_conn();
+    let rows = db::list_companies(&conn).map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(|(id, name, nif, rc, capital, activite, wilaya, is_default)| {
+        Company { id, name, nif, rc, capital, activite, wilaya, is_default }
+    }).collect())
+}
+
+#[tauri::command]
+fn add_company(input: CompanyInput) -> Result<i64, String> {
+    let conn = get_conn();
+    db::add_company(&conn, &input.name, &input.nif, &input.rc, input.capital, &input.activite, &input.wilaya)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_company(id: i64, input: CompanyInput) -> Result<(), String> {
+    let conn = get_conn();
+    db::update_company(&conn, id, &input.name, &input.nif, &input.rc, input.capital, &input.activite, &input.wilaya)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_company(id: i64) -> Result<(), String> {
+    let conn = get_conn();
+    db::delete_company(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_active_company() -> Result<Option<Company>, String> {
+    let conn = get_conn();
+    let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
+    let rows = db::list_companies(&conn).map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().find(|(id, ..)| *id == company_id).map(
+        |(id, name, nif, rc, capital, activite, wilaya, is_default)| {
+            Company { id, name, nif, rc, capital, activite, wilaya, is_default }
+        }
+    ))
+}
+
+#[tauri::command]
+fn set_active_company(id: i64) -> Result<(), String> {
+    let conn = get_conn();
+    db::set_setting(&conn, "active_company_id", &id.to_string()).map_err(|e| e.to_string())
 }
 
 // ─── App Entry Point ──────────────────────────────────────────────────────────
@@ -155,6 +248,17 @@ pub fn run() {
             add_year,
             import_values,
             save_file,
+            has_pin,
+            setup_pin,
+            verify_pin,
+            change_pin,
+            remove_pin,
+            list_companies,
+            add_company,
+            update_company,
+            delete_company,
+            get_active_company,
+            set_active_company,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

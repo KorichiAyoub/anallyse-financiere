@@ -8,6 +8,7 @@ pub fn compute_entry(
     entry_key: &str,
     formula: &str,
     year: i32,
+    company_id: i64,
     conn: &Connection,
     computed: &mut HashMap<(String, i32), f64>,
 ) -> f64 {
@@ -17,16 +18,16 @@ pub fn compute_entry(
     }
 
     let result = if formula == "sum_children" {
-        sum_leaf_descendants_of_parent(entry_id, year, conn, computed)
+        sum_leaf_descendants_of_parent(entry_id, year, company_id, conn, computed)
     } else if formula.starts_with("sum:") {
         let keys = formula[4..].split(',').map(|s| s.trim());
-        keys.map(|k| get_value_by_key(k, year, conn, computed)).sum()
+        keys.map(|k| get_value_by_key(k, year, company_id, conn, computed)).sum()
     } else if formula.starts_with("add_sub:") {
         let rest = &formula[8..];
         let parts: Vec<&str> = rest.splitn(2, '|').collect();
-        let pos: f64 = parts[0].split(',').map(|k| get_value_by_key(k.trim(), year, conn, computed)).sum();
+        let pos: f64 = parts[0].split(',').map(|k| get_value_by_key(k.trim(), year, company_id, conn, computed)).sum();
         let neg: f64 = if parts.len() > 1 {
-            parts[1].split(',').map(|k| get_value_by_key(k.trim(), year, conn, computed)).sum()
+            parts[1].split(',').map(|k| get_value_by_key(k.trim(), year, company_id, conn, computed)).sum()
         } else {
             0.0
         };
@@ -43,6 +44,7 @@ pub fn compute_entry(
 fn get_value_by_key(
     key: &str,
     year: i32,
+    company_id: i64,
     conn: &Connection,
     computed: &mut HashMap<(String, i32), f64>,
 ) -> f64 {
@@ -63,15 +65,15 @@ fn get_value_by_key(
         Some((id, is_total, formula_opt)) => {
             if is_total {
                 if let Some(formula) = formula_opt {
-                    compute_entry(id, key, &formula, year, conn, computed)
+                    compute_entry(id, key, &formula, year, company_id, conn, computed)
                 } else {
                     0.0
                 }
             } else {
                 // Leaf: fetch stored value
                 let v: Option<f64> = conn.query_row(
-                    "SELECT value FROM financial_values WHERE entry_id = ?1 AND year = ?2",
-                    params![id, year],
+                    "SELECT value FROM financial_values WHERE entry_id = ?1 AND year = ?2 AND company_id = ?3",
+                    params![id, year, company_id],
                     |r| r.get(0),
                 ).unwrap_or(None);
                 let v = v.unwrap_or(0.0);
@@ -86,6 +88,7 @@ fn get_value_by_key(
 fn sum_leaf_descendants_of_parent(
     total_entry_id: i64,
     year: i32,
+    company_id: i64,
     conn: &Connection,
     computed: &mut HashMap<(String, i32), f64>,
 ) -> f64 {
@@ -96,7 +99,7 @@ fn sum_leaf_descendants_of_parent(
         |r| r.get(0),
     ).unwrap_or(None);
 
-    sum_leaf_children(parent_id, total_entry_id, year, conn, computed)
+    sum_leaf_children(parent_id, total_entry_id, year, company_id, conn, computed)
 }
 
 /// Recursively sum all non-total, non-header leaf descendants.
@@ -104,6 +107,7 @@ fn sum_leaf_children(
     parent_id: Option<i64>,
     exclude_id: i64,
     year: i32,
+    company_id: i64,
     conn: &Connection,
     computed: &mut HashMap<(String, i32), f64>,
 ) -> f64 {
@@ -139,12 +143,12 @@ fn sum_leaf_children(
 
         if is_header || has_children {
             // Recurse into sub-header's children
-            total += sum_leaf_children(Some(child_id), i64::MAX, year, conn, computed);
+            total += sum_leaf_children(Some(child_id), i64::MAX, year, company_id, conn, computed);
         } else {
             // Leaf: add stored value
             let v: Option<f64> = conn.query_row(
-                "SELECT value FROM financial_values WHERE entry_id = ?1 AND year = ?2",
-                params![child_id, year],
+                "SELECT value FROM financial_values WHERE entry_id = ?1 AND year = ?2 AND company_id = ?3",
+                params![child_id, year, company_id],
                 |r| r.get(0),
             ).unwrap_or(None);
             total += v.unwrap_or(0.0);
@@ -157,6 +161,7 @@ fn sum_leaf_children(
 pub fn compute_all(
     total_entries: &[(i64, String, String)], // (id, key, formula)
     years: &[i32],
+    company_id: i64,
     conn: &Connection,
 ) -> HashMap<(i64, i32), f64> {
     let mut memo: HashMap<(String, i32), f64> = HashMap::new();
@@ -164,7 +169,7 @@ pub fn compute_all(
 
     for year in years {
         for (id, key, formula) in total_entries {
-            let v = compute_entry(*id, key, formula, *year, conn, &mut memo);
+            let v = compute_entry(*id, key, formula, *year, company_id, conn, &mut memo);
             result.insert((*id, *year), v);
         }
     }

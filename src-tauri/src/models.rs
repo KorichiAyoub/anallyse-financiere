@@ -2,6 +2,28 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Company {
+    pub id: i64,
+    pub name: String,
+    pub nif: String,
+    pub rc: String,
+    pub capital: f64,
+    pub activite: String,
+    pub wilaya: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CompanyInput {
+    pub name: String,
+    pub nif: String,
+    pub rc: String,
+    pub capital: f64,
+    pub activite: String,
+    pub wilaya: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct FinancialEntry {
     pub id: i64,
     pub label: String,

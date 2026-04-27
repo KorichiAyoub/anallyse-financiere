@@ -1,225 +1,46 @@
 use rusqlite::{Connection, Result, params};
-use sha2::{Sha256, Digest};
-
-const SCHEMA_VERSION: i32 = 2;
 
 pub fn init(conn: &Connection) -> Result<()> {
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=OFF;")?;
-
-    let version: i32 = conn
-        .query_row("PRAGMA user_version", [], |r| r.get(0))
-        .unwrap_or(0);
-
-    if version < SCHEMA_VERSION {
-        let has_old: bool = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='financial_entries'",
-                [], |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0) > 0;
-        if has_old { migrate_to_v2(conn)?; } else { create_schema_v2(conn)?; }
-        conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION))?;
-    }
-
-    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM financial_entries", [], |r| r.get(0))?;
-    if n == 0 { seed(conn)?; }
-
-    ensure_default_company(conn)?;
-    Ok(())
-}
-
-fn create_schema_v2(conn: &Connection) -> Result<()> {
     conn.execute_batch("
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS companies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            nif TEXT NOT NULL DEFAULT '',
-            rc TEXT NOT NULL DEFAULT '',
-            capital REAL NOT NULL DEFAULT 0,
-            activite TEXT NOT NULL DEFAULT '',
-            wilaya TEXT NOT NULL DEFAULT '',
-            is_default INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
+        PRAGMA journal_mode=WAL;
+        PRAGMA foreign_keys=ON;
+
         CREATE TABLE IF NOT EXISTS financial_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            label TEXT NOT NULL, sheet_type TEXT NOT NULL,
-            parent_id INTEGER REFERENCES financial_entries(id) ON DELETE CASCADE,
-            level INTEGER NOT NULL DEFAULT 0, order_index INTEGER NOT NULL DEFAULT 0,
-            is_total INTEGER NOT NULL DEFAULT 0, is_section_header INTEGER NOT NULL DEFAULT 0,
-            entry_key TEXT UNIQUE, formula TEXT
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            label           TEXT    NOT NULL,
+            sheet_type      TEXT    NOT NULL,
+            parent_id       INTEGER REFERENCES financial_entries(id) ON DELETE CASCADE,
+            level           INTEGER NOT NULL DEFAULT 0,
+            order_index     INTEGER NOT NULL DEFAULT 0,
+            is_total        INTEGER NOT NULL DEFAULT 0,
+            is_section_header INTEGER NOT NULL DEFAULT 0,
+            entry_key       TEXT    UNIQUE,
+            formula         TEXT
         );
+
         CREATE TABLE IF NOT EXISTS financial_values (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_id INTEGER NOT NULL REFERENCES financial_entries(id) ON DELETE CASCADE,
-            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-            year INTEGER NOT NULL, value REAL,
-            UNIQUE(entry_id, company_id, year)
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id    INTEGER NOT NULL REFERENCES financial_entries(id) ON DELETE CASCADE,
+            year        INTEGER NOT NULL,
+            value       REAL,
+            UNIQUE(entry_id, year)
         );
+
         CREATE TABLE IF NOT EXISTS app_years (
-            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-            year INTEGER NOT NULL,
-            PRIMARY KEY(company_id, year)
+            year INTEGER PRIMARY KEY
         );
     ")?;
-    Ok(())
-}
 
-fn migrate_to_v2(conn: &Connection) -> Result<()> {
-    conn.execute_batch("
-        CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
-        CREATE TABLE IF NOT EXISTS companies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
-            nif TEXT NOT NULL DEFAULT '', rc TEXT NOT NULL DEFAULT '',
-            capital REAL NOT NULL DEFAULT 0, activite TEXT NOT NULL DEFAULT '',
-            wilaya TEXT NOT NULL DEFAULT '', is_default INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        INSERT OR IGNORE INTO companies (id, name, is_default) VALUES (1, 'Mon Entreprise', 1);
-    ")?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM financial_entries",
+        [],
+        |r| r.get(0),
+    )?;
 
-    let has_cid: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('financial_values') WHERE name='company_id'",
-        [], |r| r.get::<_, i64>(0),
-    ).unwrap_or(0) > 0;
-    if !has_cid {
-        conn.execute_batch("
-            CREATE TABLE fv2 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entry_id INTEGER NOT NULL, company_id INTEGER NOT NULL DEFAULT 1,
-                year INTEGER NOT NULL, value REAL, UNIQUE(entry_id, company_id, year));
-            INSERT INTO fv2 (entry_id, company_id, year, value)
-                SELECT entry_id, 1, year, value FROM financial_values;
-            DROP TABLE financial_values;
-            ALTER TABLE fv2 RENAME TO financial_values;
-        ")?;
+    if n == 0 {
+        seed(conn)?;
     }
 
-    let has_cy: bool = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('app_years') WHERE name='company_id'",
-        [], |r| r.get::<_, i64>(0),
-    ).unwrap_or(0) > 0;
-    if !has_cy {
-        conn.execute_batch("
-            CREATE TABLE ay2 (company_id INTEGER NOT NULL DEFAULT 1, year INTEGER NOT NULL,
-                PRIMARY KEY(company_id, year));
-            INSERT OR REPLACE INTO ay2 (company_id, year) SELECT 1, year FROM app_years;
-            DROP TABLE app_years;
-            ALTER TABLE ay2 RENAME TO app_years;
-        ")?;
-    }
-
-    conn.execute(
-        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('active_company_id', '1')", [],
-    )?;
-    Ok(())
-}
-
-fn ensure_default_company(conn: &Connection) -> Result<()> {
-    let nc: i64 = conn.query_row("SELECT COUNT(*) FROM companies", [], |r| r.get(0))?;
-    if nc == 0 {
-        conn.execute("INSERT INTO companies (name, is_default) VALUES ('Mon Entreprise', 1)", [])?;
-        let cid = conn.last_insert_rowid();
-        set_setting(conn, "active_company_id", &cid.to_string())?;
-        for y in [2022i32, 2023, 2024] {
-            conn.execute("INSERT OR IGNORE INTO app_years (company_id, year) VALUES (?1, ?2)",
-                params![cid, y])?;
-        }
-    }
-    if get_setting(conn, "active_company_id")?.map(|s| s.is_empty()).unwrap_or(true) {
-        let cid: i64 = conn.query_row(
-            "SELECT id FROM companies ORDER BY is_default DESC, id LIMIT 1", [], |r| r.get(0),
-        )?;
-        set_setting(conn, "active_company_id", &cid.to_string())?;
-    }
-    let cid = get_active_company_id(conn)?;
-    let yrc: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM app_years WHERE company_id = ?1", params![cid], |r| r.get(0),
-    )?;
-    if yrc == 0 {
-        for y in [2022i32, 2023, 2024] {
-            conn.execute("INSERT OR IGNORE INTO app_years (company_id, year) VALUES (?1, ?2)",
-                params![cid, y])?;
-        }
-    }
-    Ok(())
-}
-
-// ─── App Settings ─────────────────────────────────────────────────────────────
-
-pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
-    conn.query_row("SELECT value FROM app_settings WHERE key = ?1", params![key], |r| r.get(0))
-        .map(Some)
-        .or_else(|e| if e == rusqlite::Error::QueryReturnedNoRows { Ok(None) } else { Err(e) })
-}
-
-pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    conn.execute(
-        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)", params![key, value],
-    )?;
-    Ok(())
-}
-
-pub fn delete_setting(conn: &Connection, key: &str) -> Result<()> {
-    conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
-    Ok(())
-}
-
-pub fn get_active_company_id(conn: &Connection) -> Result<i64> {
-    Ok(get_setting(conn, "active_company_id")?
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(1))
-}
-
-// ─── Company CRUD ─────────────────────────────────────────────────────────────
-
-pub fn list_companies(
-    conn: &Connection,
-) -> Result<Vec<(i64, String, String, String, f64, String, String, bool)>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, name, nif, rc, capital, activite, wilaya, is_default FROM companies ORDER BY id",
-    )?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?, r.get::<_, f64>(4)?, r.get::<_, String>(5)?,
-                r.get::<_, String>(6)?, r.get::<_, bool>(7)?,
-            ))
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(rows)
-}
-
-pub fn add_company(
-    conn: &Connection, name: &str, nif: &str, rc: &str,
-    capital: f64, activite: &str, wilaya: &str,
-) -> Result<i64> {
-    conn.execute(
-        "INSERT INTO companies (name,nif,rc,capital,activite,wilaya) VALUES (?1,?2,?3,?4,?5,?6)",
-        params![name, nif, rc, capital, activite, wilaya],
-    )?;
-    Ok(conn.last_insert_rowid())
-}
-
-pub fn update_company(
-    conn: &Connection, id: i64, name: &str, nif: &str, rc: &str,
-    capital: f64, activite: &str, wilaya: &str,
-) -> Result<()> {
-    conn.execute(
-        "UPDATE companies SET name=?1,nif=?2,rc=?3,capital=?4,activite=?5,wilaya=?6 WHERE id=?7",
-        params![name, nif, rc, capital, activite, wilaya, id],
-    )?;
-    Ok(())
-}
-
-pub fn delete_company(conn: &Connection, id: i64) -> Result<()> {
-    conn.execute("DELETE FROM companies WHERE id = ?1", params![id])?;
     Ok(())
 }
 
@@ -253,29 +74,23 @@ fn ins(conn: &Connection, e: &Entry) -> Result<i64> {
     Ok(conn.last_insert_rowid())
 }
 
-fn val(conn: &Connection, key: &str, company_id: i64, year: i32, v: Option<f64>) -> Result<()> {
+fn val(conn: &Connection, key: &str, year: i32, v: Option<f64>) -> Result<()> {
     let id: i64 = conn.query_row(
         "SELECT id FROM financial_entries WHERE entry_key = ?1",
         params![key],
         |r| r.get(0),
     )?;
     conn.execute(
-        "INSERT OR REPLACE INTO financial_values (entry_id, company_id, year, value) VALUES (?1,?2,?3,?4)",
-        params![id, company_id, year, v],
+        "INSERT OR REPLACE INTO financial_values (entry_id, year, value) VALUES (?1,?2,?3)",
+        params![id, year, v],
     )?;
     Ok(())
 }
 
 pub fn seed(conn: &Connection) -> Result<()> {
-    // Ensure default company + settings exist for seeding
-    conn.execute(
-        "INSERT OR IGNORE INTO companies (id, name, is_default) VALUES (1, 'Mon Entreprise', 1)", [],
-    )?;
-    conn.execute(
-        "INSERT OR IGNORE INTO app_settings (key, value) VALUES ('active_company_id', '1')", [],
-    )?;
+    // ─── Years ────────────────────────────────────────────────────────────────
     for y in [2022i32, 2023, 2024] {
-        conn.execute("INSERT OR IGNORE INTO app_years (company_id, year) VALUES (1, ?1)", params![y])?;
+        conn.execute("INSERT OR IGNORE INTO app_years (year) VALUES (?1)", params![y])?;
     }
 
     // ─────────────────────────────── ACTIF ───────────────────────────────────
@@ -328,9 +143,9 @@ pub fn seed(conn: &Connection) -> Result<()> {
         ("tres_actif",     4868294.28,  973815.15,   50443636.03),
     ];
     for (k, v22, v23, v24) in actif_vals {
-        val(conn, k, 1, 2022, Some(*v22))?;
-        val(conn, k, 1, 2023, Some(*v23))?;
-        val(conn, k, 1, 2024, Some(*v24))?;
+        val(conn, k, 2022, Some(*v22))?;
+        val(conn, k, 2023, Some(*v23))?;
+        val(conn, k, 2024, Some(*v24))?;
     }
 
     // ─────────────────────────────── PASSIF ──────────────────────────────────
@@ -376,9 +191,9 @@ pub fn seed(conn: &Connection) -> Result<()> {
         ("tres_passif",     0.0,          11852245.0,   128124235.0),
     ];
     for (k, v22, v23, v24) in passif_vals {
-        val(conn, k, 1, 2022, Some(*v22))?;
-        val(conn, k, 1, 2023, Some(*v23))?;
-        val(conn, k, 1, 2024, Some(*v24))?;
+        val(conn, k, 2022, Some(*v22))?;
+        val(conn, k, 2023, Some(*v23))?;
+        val(conn, k, 2024, Some(*v24))?;
     }
 
     // ──────────────────────────────── TR ─────────────────────────────────────
@@ -437,51 +252,45 @@ pub fn seed(conn: &Connection) -> Result<()> {
         ("imp_diff",     1222712.89,   3096711.82,   12639473.28),
     ];
     for (k, v22, v23, v24) in tr_vals {
-        val(conn, k, 1, 2022, Some(*v22))?;
-        val(conn, k, 1, 2023, Some(*v23))?;
-        val(conn, k, 1, 2024, Some(*v24))?;
+        val(conn, k, 2022, Some(*v22))?;
+        val(conn, k, 2023, Some(*v23))?;
+        val(conn, k, 2024, Some(*v24))?;
     }
 
     Ok(())
 }
 
-pub fn get_all_values(
-    conn: &Connection, sheet_type: &str, company_id: i64,
-) -> rusqlite::Result<Vec<(i64, i32, Option<f64>)>> {
+/// Get all leaf values for a sheet as a HashMap<entry_key, HashMap<year, value>>
+pub fn get_all_values(conn: &Connection, sheet_type: &str) -> rusqlite::Result<Vec<(i64, i32, Option<f64>)>> {
     let mut stmt = conn.prepare(
         "SELECT fv.entry_id, fv.year, fv.value
          FROM financial_values fv
          JOIN financial_entries fe ON fe.id = fv.entry_id
-         WHERE fe.sheet_type = ?1 AND fv.company_id = ?2
+         WHERE fe.sheet_type = ?1
          ORDER BY fv.entry_id, fv.year"
     )?;
-    let rows = stmt.query_map(params![sheet_type, company_id], |r| {
+    let rows = stmt.query_map(params![sheet_type], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, i32>(1)?, r.get::<_, Option<f64>>(2)?))
     })?.filter_map(|r| r.ok()).collect();
     Ok(rows)
 }
 
-pub fn get_years(conn: &Connection, company_id: i64) -> rusqlite::Result<Vec<i32>> {
-    let mut stmt = conn.prepare("SELECT year FROM app_years WHERE company_id = ?1 ORDER BY year")?;
-    let years = stmt.query_map(params![company_id], |r| r.get(0))?.filter_map(|r| r.ok()).collect();
+pub fn get_years(conn: &Connection) -> rusqlite::Result<Vec<i32>> {
+    let mut stmt = conn.prepare("SELECT year FROM app_years ORDER BY year")?;
+    let years = stmt.query_map([], |r| r.get(0))?.filter_map(|r| r.ok()).collect();
     Ok(years)
 }
 
-pub fn upsert_value(
-    conn: &Connection, entry_id: i64, company_id: i64, year: i32, value: Option<f64>,
-) -> rusqlite::Result<()> {
+pub fn upsert_value(conn: &Connection, entry_id: i64, year: i32, value: Option<f64>) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO financial_values (entry_id, company_id, year, value) VALUES (?1,?2,?3,?4)",
-        params![entry_id, company_id, year, value],
+        "INSERT OR REPLACE INTO financial_values (entry_id, year, value) VALUES (?1,?2,?3)",
+        params![entry_id, year, value],
     )?;
     Ok(())
 }
 
-pub fn add_year(conn: &Connection, company_id: i64, year: i32) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO app_years (company_id, year) VALUES (?1, ?2)",
-        params![company_id, year],
-    )?;
+pub fn add_year(conn: &Connection, year: i32) -> rusqlite::Result<()> {
+    conn.execute("INSERT OR IGNORE INTO app_years (year) VALUES (?1)", params![year])?;
     Ok(())
 }
 
@@ -493,42 +302,4 @@ pub fn get_entry_id_by_label(conn: &Connection, sheet_type: &str, label: &str) -
     ).map(Some).or_else(|e| {
         if e == rusqlite::Error::QueryReturnedNoRows { Ok(None) } else { Err(e) }
     })
-}
-
-// ─── PIN Auth ─────────────────────────────────────────────────────────────────
-
-fn hash_pin(salt: &str, pin: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(format!("{}{}", salt, pin).as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-pub fn has_pin(conn: &Connection) -> bool {
-    get_setting(conn, "pin_hash").map(|v| v.is_some()).unwrap_or(false)
-}
-
-pub fn setup_pin(conn: &Connection, pin: &str) -> Result<()> {
-    let salt = format!("{:x}", rand_salt());
-    let hash = hash_pin(&salt, pin);
-    set_setting(conn, "pin_hash", &format!("{}:{}", salt, hash))
-}
-
-pub fn verify_pin(conn: &Connection, pin: &str) -> Result<bool> {
-    match get_setting(conn, "pin_hash")? {
-        None => Ok(false),
-        Some(stored) => {
-            let parts: Vec<&str> = stored.splitn(2, ':').collect();
-            if parts.len() != 2 { return Ok(false); }
-            Ok(hash_pin(parts[0], pin) == parts[1])
-        }
-    }
-}
-
-pub fn remove_pin(conn: &Connection) -> Result<()> {
-    delete_setting(conn, "pin_hash")
-}
-
-fn rand_salt() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
 }

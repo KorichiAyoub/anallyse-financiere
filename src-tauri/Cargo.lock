@@ -48,10 +48,12 @@ dependencies = [
 name = "analyse-financiere-app"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "once_cell",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
