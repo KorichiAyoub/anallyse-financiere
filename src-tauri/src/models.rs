@@ -51,3 +51,37 @@ pub struct ImportRow {
     pub year: i32,
     pub value: Option<f64>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DetteAge {
+    pub category: String,
+    pub label: String,
+    pub total: f64,
+    pub moins_1_an: f64,
+    pub plus_1_an: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BilanFonctionnel {
+    pub year: i32,
+    // ACTIF
+    pub actifs_fixes: f64,
+    pub actifs_circulants: f64,
+    pub disponibilites: f64,
+    pub total_actif_bf: f64,
+    pub pct_actifs_fixes: f64,
+    pub pct_actifs_circulants: f64,
+    pub pct_disponibilites: f64,
+    // PASSIF
+    pub capitaux_propres: f64,
+    pub dlmt: f64,
+    pub dct: f64,
+    pub total_passif_bf: f64,
+    pub pct_cp: f64,
+    pub pct_dlmt: f64,
+    pub pct_dct: f64,
+    // Retraitements used (for transparency)
+    pub amort_anc: f64,
+    pub prov_stocks: f64,
+    pub prov_creances: f64,
+}

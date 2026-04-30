@@ -2,7 +2,7 @@ mod db;
 mod models;
 mod compute;
 
-use models::{Company, CompanyInput, FinancialEntry, SheetData, ImportRow};
+use models::{Company, CompanyInput, FinancialEntry, SheetData, ImportRow, DetteAge, BilanFonctionnel};
 use once_cell::sync::OnceCell;
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -222,6 +222,103 @@ fn set_active_company(id: i64) -> Result<(), String> {
     db::set_setting(&conn, "active_company_id", &id.to_string()).map_err(|e| e.to_string())
 }
 
+// ─── Bilan Fonctionnel Commands ───────────────────────────────────────────────
+
+#[tauri::command]
+fn get_dettes_par_age(year: i32) -> Result<Vec<DetteAge>, String> {
+    let conn = get_conn();
+    let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
+    let rows = db::get_dettes_par_age_rows(&conn, company_id, year).map_err(|e| e.to_string())?;
+    Ok(rows.into_iter().map(|(category, label, total, moins_1_an)| DetteAge {
+        category,
+        label,
+        total,
+        moins_1_an,
+        plus_1_an: (total - moins_1_an).max(0.0),
+    }).collect())
+}
+
+#[tauri::command]
+fn set_dette_age(year: i32, category: String, moins_1_an: f64) -> Result<(), String> {
+    let conn = get_conn();
+    let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
+    db::set_dette_age(&conn, company_id, year, &category, moins_1_an).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_retraitement_values(year: i32, amort_anc: f64, prov_stocks: f64, prov_creances: f64) -> Result<(), String> {
+    let conn = get_conn();
+    let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
+    db::set_retraitement(&conn, company_id, year, amort_anc, prov_stocks, prov_creances)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_bilan_fonctionnel(year: i32) -> Result<BilanFonctionnel, String> {
+    let conn = get_conn();
+    let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
+
+    // Get retraitements (automated journal)
+    let (amort_anc, prov_stocks, prov_creances) =
+        db::get_retraitements(&conn, company_id, year).map_err(|e| e.to_string())?;
+
+    // ACTIF values (NET from DB)
+    let total_anc      = compute::get_entry_value("total_anc",    year, company_id, &conn);
+    let stocks         = compute::get_entry_value("stocks",       year, company_id, &conn);
+    let clients        = compute::get_entry_value("clients",      year, company_id, &conn);
+    let autres_deb     = compute::get_entry_value("autres_deb",   year, company_id, &conn);
+    let impots_ac      = compute::get_entry_value("impots_ac",    year, company_id, &conn);
+    let autres_crean   = compute::get_entry_value("autres_crean", year, company_id, &conn);
+    let tres_actif     = compute::get_entry_value("tres_actif",   year, company_id, &conn);
+    let placements     = compute::get_entry_value("placements",   year, company_id, &conn);
+    let creances_net   = clients + autres_deb + impots_ac + autres_crean;
+
+    // Bilan Fonctionnel ACTIF (Brut = NET + amortissements/provisions)
+    let actifs_fixes       = total_anc + amort_anc;
+    let actifs_circulants  = stocks + prov_stocks + creances_net + prov_creances;
+    let disponibilites     = tres_actif + placements;
+    let total_actif_bf     = actifs_fixes + actifs_circulants + disponibilites;
+
+    // PASSIF values
+    let total_cp   = compute::get_entry_value("total_cp",   year, company_id, &conn);
+    let total_pnc  = compute::get_entry_value("total_pnc",  year, company_id, &conn);
+    let tres_passif = compute::get_entry_value("tres_passif", year, company_id, &conn);
+
+    // Dettes par âge
+    let dettes_rows = db::get_dettes_par_age_rows(&conn, company_id, year).map_err(|e| e.to_string())?;
+    let total_moins_1_an: f64 = dettes_rows.iter().map(|(_, _, _, m)| m).sum();
+    let total_plus_1_an: f64  = dettes_rows.iter().map(|(_, _, t, m)| (t - m).max(0.0)).sum();
+
+    // DLMT = PNC (provisions LT + emprunts) + dettes >1 an from dettes par âge
+    let dlmt = total_pnc + total_plus_1_an;
+    // DCT  = dettes <1 an + trésorerie passif
+    let dct  = total_moins_1_an + tres_passif;
+    let total_passif_bf = total_cp + dlmt + dct;
+
+    let safe = |n: f64, d: f64| if d != 0.0 { n / d * 100.0 } else { 0.0 };
+
+    Ok(BilanFonctionnel {
+        year,
+        actifs_fixes,
+        actifs_circulants,
+        disponibilites,
+        total_actif_bf,
+        pct_actifs_fixes:      safe(actifs_fixes,      total_actif_bf),
+        pct_actifs_circulants: safe(actifs_circulants, total_actif_bf),
+        pct_disponibilites:    safe(disponibilites,    total_actif_bf),
+        capitaux_propres: total_cp,
+        dlmt,
+        dct,
+        total_passif_bf,
+        pct_cp:   safe(total_cp, total_passif_bf),
+        pct_dlmt: safe(dlmt,     total_passif_bf),
+        pct_dct:  safe(dct,      total_passif_bf),
+        amort_anc,
+        prov_stocks,
+        prov_creances,
+    })
+}
+
 // ─── App Entry Point ──────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -259,6 +356,10 @@ pub fn run() {
             delete_company,
             get_active_company,
             set_active_company,
+            get_dettes_par_age,
+            set_dette_age,
+            set_retraitement_values,
+            get_bilan_fonctionnel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

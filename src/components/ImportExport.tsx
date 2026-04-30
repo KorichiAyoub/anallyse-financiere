@@ -53,13 +53,102 @@ export default function ImportExport({ sheet, data, onImportDone }: Props) {
         const ws = wb.Sheets[sheetName];
         const rows: unknown[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null }) as unknown[][];
 
-        if (rows.length < 2) continue;
+        if (rows.length < 3) continue;
 
-        // Row 1 (index 1) contains headers: LIBELLE, year1, year2, ...
+        // ── Detect format: Brut / Amort / Net (one-year SCF format) ──────────
+        const isBrutFormat = (() => {
+          for (let ri = 0; ri < Math.min(5, rows.length); ri++) {
+            const cells = (rows[ri] as unknown[]).map((c) => String(c ?? "").toLowerCase());
+            const hasBrut = cells.some((c) => c.startsWith("brut"));
+            const hasAmort = cells.some((c) => c.includes("amort") || c.includes("prov"));
+            if (hasBrut && hasAmort) return ri;
+          }
+          return -1;
+        })();
+
+        if (isBrutFormat >= 0 && targetSheet === "ACTIF") {
+          // ── New Brut/Amort/Net format ─────────────────────────────────────
+          const headerRow = rows[isBrutFormat] as unknown[];
+
+          // Extract year: look for "YYYY" in any header cell
+          let year = 0;
+          for (const cell of headerRow) {
+            const s = String(cell ?? "");
+            const m = s.match(/\b(20\d{2})\b/);
+            if (m) { year = parseInt(m[1]); break; }
+          }
+          // Also search in rows 0 and 1
+          if (!year) {
+            for (let ri = 0; ri < isBrutFormat; ri++) {
+              for (const cell of rows[ri] as unknown[]) {
+                const m = String(cell ?? "").match(/\b(20\d{2})\b/);
+                if (m) { year = parseInt(m[1]); break; }
+              }
+              if (year) break;
+            }
+          }
+          if (!year) continue;
+
+          // Find column indices: col 0 = label, col 1 = Brut, col 2 = Amort, col 3 = Net
+          let amortCol = 2, netCol = 3;
+          for (let ci = 0; ci < headerRow.length; ci++) {
+            const h = String(headerRow[ci] ?? "").toLowerCase();
+            if (h.includes("amort") || h.includes("prov")) amortCol = ci;
+            else if (h.startsWith("net")) netCol = ci;
+          }
+
+          const importRows: ImportRow[] = [];
+          let amortAnc = 0;
+          let provStocks = 0;
+          let provCreances = 0;
+
+          const parseNum = (v: unknown): number | null => {
+            if (v === null || v === undefined || v === "") return null;
+            const n = parseFloat(String(v));
+            return isNaN(n) ? null : n;
+          };
+
+          for (let ri = isBrutFormat + 1; ri < rows.length; ri++) {
+            const row = rows[ri] as unknown[];
+            const label = String(row[0] ?? "").trim();
+            if (!label) continue;
+
+            const netVal = parseNum(row[netCol]);
+            const amortVal = parseNum(row[amortCol]) ?? 0;
+
+            // Store NET for all rows (leaf entries will match by label)
+            if (netVal !== null) {
+              importRows.push({ label, year, value: netVal });
+            }
+
+            // Automated retraitement: collect amortissements by section
+            const lc = label.toLowerCase();
+            if (lc.includes("total actif non courant") || lc.includes("total anc")) {
+              amortAnc = amortVal;
+            } else if (lc.startsWith("stocks")) {
+              provStocks = amortVal;
+            } else if (lc.includes("créances") && !lc.includes("autres créances")) {
+              provCreances = amortVal;
+            }
+          }
+
+          const count = await invokeTauri<number>("import_values", { rows: importRows, sheetType: targetSheet });
+          totalImported += count;
+
+          // Store retraitements (journal automatisé)
+          if (amortAnc > 0 || provStocks > 0 || provCreances > 0) {
+            await invokeTauri("set_retraitement_values", {
+              year, amortAnc, provStocks, provCreances,
+            });
+          }
+          continue;
+        }
+
+        // ── Standard year-column format ───────────────────────────────────────
         const headers = rows[1] as unknown[];
         const yearCols: Array<{ colIndex: number; year: number }> = [];
         headers.forEach((h, i) => {
-          if (i < 2) return; // skip first 2 cols (empty + label)
+          if (i < 2) return;
           const y = parseInt(String(h));
           if (!isNaN(y) && y > 1990 && y < 2100) yearCols.push({ colIndex: i, year: y });
         });

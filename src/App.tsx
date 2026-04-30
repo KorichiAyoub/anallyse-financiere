@@ -8,10 +8,11 @@ import LockScreen from "./components/LockScreen";
 import CompanyManager from "./components/CompanyManager";
 import Dashboard from "./components/Dashboard";
 import RatiosFinanciers from "./components/RatiosFinanciers";
+import BilanFonctionnel from "./components/BilanFonctionnel";
 import { invokeTauri, isTauriRuntime } from "./lib/tauri";
 import "./App.css";
 
-type AppTab = SheetType | "DASHBOARD" | "RATIOS";
+type AppTab = SheetType | "DASHBOARD" | "RATIOS" | "BILAN_FONC";
 
 const TABS: Array<{ id: AppTab; label: string; icon: string; group?: string }> = [
   { id: "DASHBOARD", label: "Tableau de bord", icon: "📊" },
@@ -20,6 +21,7 @@ const TABS: Array<{ id: AppTab; label: string; icon: string; group?: string }> =
   { id: "PASSIF",    label: "Passif",             icon: "📋", group: "Bilan" },
   { id: "TR",        label: "Compte de Résultat", icon: "📈", group: "Résultats" },
   { id: "BILAN",     label: "Bilan Financier",    icon: "⚖️",  group: "Résultats" },
+  { id: "BILAN_FONC", label: "Bilan Fonctionnel", icon: "🔄", group: "Analyse" },
 ];
 
 function AddYearModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
@@ -170,7 +172,7 @@ function App() {
           ))}
 
           {/* Grouped sections */}
-          {["Bilan", "Résultats"].map((group) => (
+          {["Bilan", "Résultats", "Analyse"].map((group) => (
             <div key={group} className="pt-4">
               <p className="px-3 mb-1 text-xs font-semibold text-slate-500 uppercase tracking-wider">{group}</p>
               {TABS.filter((t) => t.group === group).map((tab) => (
@@ -233,6 +235,8 @@ function App() {
         <main className="flex-1 overflow-auto bg-slate-50">
           {(activeTab === "DASHBOARD" || activeTab === "RATIOS") ? (
             <DashboardWrapper activeTab={activeTab} companySwitchKey={companySwitchKey} />
+          ) : activeTab === "BILAN_FONC" ? (
+            <BilanFonctionnel key={companySwitchKey} companySwitchKey={companySwitchKey} />
           ) : (
             <div className="bg-white shadow-sm m-4 rounded-xl border border-slate-200">
               <SheetView key={`${activeTab}-${companySwitchKey}`} sheet={activeTab as SheetType} onCompanySwitch={companySwitchKey} />

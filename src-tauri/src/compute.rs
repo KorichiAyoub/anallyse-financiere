@@ -157,6 +157,12 @@ fn sum_leaf_children(
     total
 }
 
+/// Public helper: get the value of any entry (leaf or total) by its entry_key for a given year.
+pub fn get_entry_value(key: &str, year: i32, company_id: i64, conn: &Connection) -> f64 {
+    let mut memo: HashMap<(String, i32), f64> = HashMap::new();
+    get_value_by_key(key, year, company_id, conn, &mut memo)
+}
+
 /// Build a computed map over all years so the UI can display everything at once.
 pub fn compute_all(
     total_entries: &[(i64, String, String)], // (id, key, formula)

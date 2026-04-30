@@ -1,7 +1,7 @@
 use rusqlite::{Connection, Result, params};
 use sha2::{Sha256, Digest};
 
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 pub fn init(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=OFF;")?;
@@ -17,7 +17,12 @@ pub fn init(conn: &Connection) -> Result<()> {
                 [], |r| r.get::<_, i64>(0),
             )
             .unwrap_or(0) > 0;
-        if has_old { migrate_to_v2(conn)?; } else { create_schema_v2(conn)?; }
+        if has_old {
+            if version < 2 { migrate_to_v2(conn)?; }
+            migrate_to_v3(conn)?;
+        } else {
+            create_schema_v3(conn)?;
+        }
         conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION))?;
     }
 
@@ -30,7 +35,7 @@ pub fn init(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn create_schema_v2(conn: &Connection) -> Result<()> {
+fn create_schema_v3(conn: &Connection) -> Result<()> {
     conn.execute_batch("
         CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT ''
@@ -65,6 +70,42 @@ fn create_schema_v2(conn: &Connection) -> Result<()> {
             company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
             year INTEGER NOT NULL,
             PRIMARY KEY(company_id, year)
+        );
+        CREATE TABLE IF NOT EXISTS retraitements (
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            year INTEGER NOT NULL,
+            amort_anc REAL NOT NULL DEFAULT 0,
+            prov_stocks REAL NOT NULL DEFAULT 0,
+            prov_creances REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(company_id, year)
+        );
+        CREATE TABLE IF NOT EXISTS dettes_par_age (
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            year INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            moins_1_an REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(company_id, year, category)
+        );
+    ")?;
+    Ok(())
+}
+
+fn migrate_to_v3(conn: &Connection) -> Result<()> {
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS retraitements (
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            year INTEGER NOT NULL,
+            amort_anc REAL NOT NULL DEFAULT 0,
+            prov_stocks REAL NOT NULL DEFAULT 0,
+            prov_creances REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(company_id, year)
+        );
+        CREATE TABLE IF NOT EXISTS dettes_par_age (
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            year INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            moins_1_an REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(company_id, year, category)
         );
     ")?;
     Ok(())
@@ -531,4 +572,74 @@ pub fn remove_pin(conn: &Connection) -> Result<()> {
 fn rand_salt() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
+}
+
+// ─── Retraitements ───────────────────────────────────────────────────────────
+
+/// Returns (amort_anc, prov_stocks, prov_creances) for the journal de retraitement.
+pub fn get_retraitements(conn: &Connection, company_id: i64, year: i32) -> rusqlite::Result<(f64, f64, f64)> {
+    conn.query_row(
+        "SELECT COALESCE(amort_anc,0), COALESCE(prov_stocks,0), COALESCE(prov_creances,0)
+         FROM retraitements WHERE company_id = ?1 AND year = ?2",
+        params![company_id, year],
+        |r| Ok((r.get::<_, f64>(0)?, r.get::<_, f64>(1)?, r.get::<_, f64>(2)?)),
+    ).or_else(|e| {
+        if e == rusqlite::Error::QueryReturnedNoRows { Ok((0.0, 0.0, 0.0)) } else { Err(e) }
+    })
+}
+
+pub fn set_retraitement(
+    conn: &Connection, company_id: i64, year: i32,
+    amort_anc: f64, prov_stocks: f64, prov_creances: f64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO retraitements (company_id, year, amort_anc, prov_stocks, prov_creances)
+         VALUES (?1,?2,?3,?4,?5)",
+        params![company_id, year, amort_anc, prov_stocks, prov_creances],
+    )?;
+    Ok(())
+}
+
+// ─── Dettes par âge ──────────────────────────────────────────────────────────
+
+/// Returns rows: (category_key, label, total_from_passif, moins_1_an)
+pub fn get_dettes_par_age_rows(
+    conn: &Connection, company_id: i64, year: i32,
+) -> rusqlite::Result<Vec<(String, String, f64, f64)>> {
+    let categories: &[(&str, &str)] = &[
+        ("fournisseurs",    "Fournisseurs et comptes rattachés"),
+        ("impots_pc",       "Impôts"),
+        ("autres_dettes_c", "Autres dettes"),
+    ];
+
+    let mut result = Vec::new();
+    for (key, label) in categories {
+        let total: f64 = conn.query_row(
+            "SELECT COALESCE(fv.value, 0) FROM financial_values fv
+             JOIN financial_entries fe ON fe.id = fv.entry_id
+             WHERE fe.entry_key = ?1 AND fv.company_id = ?2 AND fv.year = ?3",
+            params![key, company_id, year],
+            |r| r.get::<_, f64>(0),
+        ).unwrap_or(0.0);
+
+        // Default: all is DCT (moins 1 an = total) if no entry exists yet
+        let moins_1_an: f64 = conn.query_row(
+            "SELECT moins_1_an FROM dettes_par_age WHERE company_id = ?1 AND year = ?2 AND category = ?3",
+            params![company_id, year, key],
+            |r| r.get::<_, f64>(0),
+        ).unwrap_or(total);
+
+        result.push((key.to_string(), label.to_string(), total, moins_1_an));
+    }
+    Ok(result)
+}
+
+pub fn set_dette_age(
+    conn: &Connection, company_id: i64, year: i32, category: &str, moins_1_an: f64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO dettes_par_age (company_id, year, category, moins_1_an) VALUES (?1,?2,?3,?4)",
+        params![company_id, year, category, moins_1_an],
+    )?;
+    Ok(())
 }
