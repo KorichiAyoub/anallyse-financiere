@@ -57,6 +57,132 @@ function AddYearModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
   );
 }
 
+// ── Amortissements & Provisions panel (shown below ACTIF table) ───────────────
+
+interface AmortRow {
+  amort_key: string;
+  amort: number;
+}
+
+const AMORT_LABELS: Record<string, string> = {
+  imm_incorp: "Amort. Immo. Incorporelles (Cpte 28)",
+  imm_corp:   "Amort. Immo. Corporelles (Cpte 28)",
+  stocks:     "Prov. Dépréciation Stocks (Cpte 39)",
+  creances:   "Prov. Dépréciation Créances (Cpte 49)",
+};
+const AMORT_KEYS = ["imm_incorp", "imm_corp", "stocks", "creances"] as const;
+
+function AmortPanel({ years }: { years: number[] }) {
+  // map: year -> amort_key -> value
+  const [amorts, setAmorts] = useState<Record<number, Record<string, number>>>({});
+  const [editing, setEditing] = useState<Record<string, string>>({});
+  const tauriMode = isTauriRuntime();
+
+  useEffect(() => {
+    if (!tauriMode) return;
+    (async () => {
+      const next: Record<number, Record<string, number>> = {};
+      for (const y of years) {
+        const rows = await invokeTauri<AmortRow[]>("get_actif_amorts", { year: y });
+        next[y] = Object.fromEntries(rows.map(r => [r.amort_key, r.amort]));
+      }
+      setAmorts(next);
+    })();
+  }, [years, tauriMode]);
+
+  const cellKey = (k: string, y: number) => `${k}-${y}`;
+
+  const handleFocus = (k: string, y: number) => {
+    const cur = amorts[y]?.[k] ?? 0;
+    setEditing(p => ({ ...p, [cellKey(k, y)]: cur === 0 ? "" : String(cur) }));
+  };
+
+  const handleChange = (k: string, y: number, val: string) => {
+    setEditing(p => ({ ...p, [cellKey(k, y)]: val }));
+  };
+
+  const handleBlur = async (k: string, y: number) => {
+    const raw = editing[cellKey(k, y)];
+    if (raw === undefined) return;
+    const parsed = parseFloat(raw.replace(/\s/g, "").replace(",", "."));
+    const value = isNaN(parsed) || parsed < 0 ? 0 : parsed;
+    setEditing(p => { const n = { ...p }; delete n[cellKey(k, y)]; return n; });
+    setAmorts(p => ({ ...p, [y]: { ...(p[y] ?? {}), [k]: value } }));
+    if (tauriMode) {
+      await invokeTauri("set_actif_amort", { year: y, amortKey: k, amort: value });
+    }
+  };
+
+  const fmt = (v: number) =>
+    v === 0 ? "—" : new Intl.NumberFormat("fr-DZ", { maximumFractionDigits: 0 }).format(v);
+
+  return (
+    <div className="mx-4 mb-4 bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-amber-200 dark:border-amber-700 overflow-hidden">
+      <div className="bg-amber-600 px-4 py-2.5 flex items-center gap-2">
+        <span className="text-white text-sm">📐</span>
+        <h3 className="text-white font-bold text-sm tracking-wide">
+          Amortissements &amp; Provisions Cumulés — Colonne Amort/Dép du Bilan
+        </h3>
+      </div>
+      <p className="text-xs text-slate-500 dark:text-slate-400 px-4 pt-2 pb-1 italic">
+        Saisir les montants cumulés de la colonne «&nbsp;Amort./Dép.&nbsp;» de votre bilan comptable.
+        Ces données alimentent automatiquement le journal de retraitement du bilan fonctionnel.
+      </p>
+      <div className="overflow-x-auto px-4 pb-4">
+        <table className="w-full text-sm border-collapse mt-2">
+          <thead>
+            <tr className="bg-amber-50 dark:bg-amber-900/20 border-b-2 border-amber-200 dark:border-amber-700">
+              <th className="text-left py-2 px-3 font-semibold text-amber-800 dark:text-amber-300">Poste</th>
+              {years.map(y => (
+                <th key={y} className="text-right py-2 px-3 font-semibold text-amber-800 dark:text-amber-300 w-36">{y}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {AMORT_KEYS.map((k, i) => (
+              <tr key={k} className={i % 2 === 0 ? "bg-white dark:bg-slate-800" : "bg-amber-50/40 dark:bg-amber-900/10"}>
+                <td className="py-2 px-3 text-slate-700 dark:text-slate-300 font-medium">{AMORT_LABELS[k]}</td>
+                {years.map(y => {
+                  const ck = cellKey(k, y);
+                  const isEditing = editing[ck] !== undefined;
+                  const cur = amorts[y]?.[k] ?? 0;
+                  return (
+                    <td key={y} className="py-1 px-2">
+                      {tauriMode ? (
+                        <input
+                          type="text"
+                          className="w-full text-right font-mono px-2 py-1 rounded border text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-700 text-amber-900 dark:text-amber-200"
+                          value={isEditing ? editing[ck] : (cur === 0 ? "" : String(cur))}
+                          placeholder="0"
+                          onFocus={() => handleFocus(k, y)}
+                          onChange={e => handleChange(k, y, e.target.value)}
+                          onBlur={() => handleBlur(k, y)}
+                          onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                        />
+                      ) : (
+                        <span className="block text-right font-mono text-slate-600 dark:text-slate-300 px-2">{fmt(cur)}</span>
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+            <tr className="bg-amber-100 dark:bg-amber-900/30 border-t-2 border-amber-300 dark:border-amber-600 font-bold">
+              <td className="py-2 px-3 text-amber-900 dark:text-amber-200">Total Amort. + Provisions</td>
+              {years.map(y => {
+                const total = AMORT_KEYS.reduce((s, k) => s + (amorts[y]?.[k] ?? 0), 0);
+                return (
+                  <td key={y} className="py-2 px-3 text-right font-mono text-amber-900 dark:text-amber-200">{fmt(total)}</td>
+                );
+              })}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function SheetView({ sheet, onCompanySwitch }: { sheet: SheetType; onCompanySwitch: number }) {
   const { data, loading, error, refresh, updateValue } = useSheetData(sheet);
   const [showAddYear, setShowAddYear] = useState(false);
@@ -85,6 +211,7 @@ function SheetView({ sheet, onCompanySwitch }: { sheet: SheetType; onCompanySwit
       <div className="px-4 pb-4">
         <FinancialTable data={data} sheet={sheet} onUpdate={updateValue} readOnly={isReadOnly} />
       </div>
+      {sheet === "ACTIF" && <AmortPanel years={data.years} />}
       {showAddYear && <AddYearModal onClose={() => setShowAddYear(false)} onAdded={refresh} />}
     </div>
   );

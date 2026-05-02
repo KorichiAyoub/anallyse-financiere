@@ -62,6 +62,12 @@ pub struct DetteAge {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct AmortEntry {
+    pub amort_key: String,
+    pub amort: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BilanFonctionnel {
     pub year: i32,
     // ACTIF

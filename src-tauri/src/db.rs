@@ -1,7 +1,8 @@
 use rusqlite::{Connection, Result, params};
 use sha2::{Sha256, Digest};
+use std::collections::HashMap;
 
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 pub fn init(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=OFF;")?;
@@ -19,9 +20,11 @@ pub fn init(conn: &Connection) -> Result<()> {
             .unwrap_or(0) > 0;
         if has_old {
             if version < 2 { migrate_to_v2(conn)?; }
-            migrate_to_v3(conn)?;
+            if version < 3 { migrate_to_v3(conn)?; }
+            migrate_to_v4(conn)?;
         } else {
             create_schema_v3(conn)?;
+            migrate_to_v4(conn)?;
         }
         conn.execute_batch(&format!("PRAGMA user_version = {};", SCHEMA_VERSION))?;
     }
@@ -106,6 +109,19 @@ fn migrate_to_v3(conn: &Connection) -> Result<()> {
             category TEXT NOT NULL,
             moins_1_an REAL NOT NULL DEFAULT 0,
             PRIMARY KEY(company_id, year, category)
+        );
+    ")?;
+    Ok(())
+}
+
+fn migrate_to_v4(conn: &Connection) -> Result<()> {
+    conn.execute_batch("
+        CREATE TABLE IF NOT EXISTS financial_amorts (
+            company_id INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+            year INTEGER NOT NULL,
+            amort_key TEXT NOT NULL,
+            amort REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY(company_id, year, amort_key)
         );
     ")?;
     Ok(())
@@ -572,6 +588,52 @@ pub fn remove_pin(conn: &Connection) -> Result<()> {
 fn rand_salt() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
+}
+
+// ─── Financial Amorts (Amort/Dép column from ACTIF balance sheet) ─────────────
+
+/// Returns all amort values for a company+year as a map amort_key -> amort.
+pub fn get_amorts(conn: &Connection, company_id: i64, year: i32) -> rusqlite::Result<HashMap<String, f64>> {
+    let mut stmt = conn.prepare(
+        "SELECT amort_key, amort FROM financial_amorts WHERE company_id = ?1 AND year = ?2"
+    )?;
+    let rows = stmt.query_map(params![company_id, year], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?))
+    })?;
+    let mut map = HashMap::new();
+    for row in rows {
+        let (k, v) = row?;
+        map.insert(k, v);
+    }
+    Ok(map)
+}
+
+pub fn set_amort(
+    conn: &Connection, company_id: i64, year: i32, amort_key: &str, amort: f64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO financial_amorts (company_id, year, amort_key, amort) VALUES (?1,?2,?3,?4)",
+        params![company_id, year, amort_key, amort],
+    )?;
+    Ok(())
+}
+
+/// Returns (amort_anc, prov_stocks, prov_creances) computed from financial_amorts.
+/// Falls back to the old retraitements table if no amort data has been entered yet.
+pub fn get_amorts_for_journal(conn: &Connection, company_id: i64, year: i32) -> rusqlite::Result<(f64, f64, f64)> {
+    let map = get_amorts(conn, company_id, year)?;
+    let imm_incorp = map.get("imm_incorp").copied().unwrap_or(0.0);
+    let imm_corp   = map.get("imm_corp").copied().unwrap_or(0.0);
+    let prov_stk   = map.get("stocks").copied().unwrap_or(0.0);
+    let prov_cr    = map.get("creances").copied().unwrap_or(0.0);
+    let amort_anc  = imm_incorp + imm_corp;
+
+    // If at least one value was entered in financial_amorts, use it exclusively
+    if amort_anc > 0.0 || prov_stk > 0.0 || prov_cr > 0.0 {
+        return Ok((amort_anc, prov_stk, prov_cr));
+    }
+    // Fallback: read from old retraitements table
+    get_retraitements(conn, company_id, year)
 }
 
 // ─── Retraitements ───────────────────────────────────────────────────────────

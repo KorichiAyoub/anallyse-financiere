@@ -2,7 +2,7 @@ mod db;
 mod models;
 mod compute;
 
-use models::{Company, CompanyInput, FinancialEntry, SheetData, ImportRow, DetteAge, BilanFonctionnel};
+use models::{Company, CompanyInput, FinancialEntry, SheetData, ImportRow, DetteAge, AmortEntry, BilanFonctionnel};
 use once_cell::sync::OnceCell;
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -222,6 +222,26 @@ fn set_active_company(id: i64) -> Result<(), String> {
     db::set_setting(&conn, "active_company_id", &id.to_string()).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_actif_amorts(year: i32) -> Result<Vec<AmortEntry>, String> {
+    let conn = get_conn();
+    let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
+    let map = db::get_amorts(&conn, company_id, year).map_err(|e| e.to_string())?;
+    // Return all 4 keys, defaulting to 0 if not yet set
+    let keys = ["imm_incorp", "imm_corp", "stocks", "creances"];
+    Ok(keys.iter().map(|k| AmortEntry {
+        amort_key: k.to_string(),
+        amort: map.get(*k).copied().unwrap_or(0.0),
+    }).collect())
+}
+
+#[tauri::command]
+fn set_actif_amort(year: i32, amort_key: String, amort: f64) -> Result<(), String> {
+    let conn = get_conn();
+    let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
+    db::set_amort(&conn, company_id, year, &amort_key, amort).map_err(|e| e.to_string())
+}
+
 // ─── Bilan Fonctionnel Commands ───────────────────────────────────────────────
 
 #[tauri::command]
@@ -258,9 +278,9 @@ fn get_bilan_fonctionnel(year: i32) -> Result<BilanFonctionnel, String> {
     let conn = get_conn();
     let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
 
-    // Get retraitements (automated journal)
+    // Get retraitements — auto-computed from financial_amorts entered in the ACTIF tab
     let (amort_anc, prov_stocks, prov_creances) =
-        db::get_retraitements(&conn, company_id, year).map_err(|e| e.to_string())?;
+        db::get_amorts_for_journal(&conn, company_id, year).map_err(|e| e.to_string())?;
 
     // ACTIF values (NET from DB)
     let total_anc      = compute::get_entry_value("total_anc",    year, company_id, &conn);
@@ -313,6 +333,7 @@ fn get_bilan_fonctionnel(year: i32) -> Result<BilanFonctionnel, String> {
         pct_cp:   safe(total_cp, total_passif_bf),
         pct_dlmt: safe(dlmt,     total_passif_bf),
         pct_dct:  safe(dct,      total_passif_bf),
+        // Also expose the breakdown for display
         amort_anc,
         prov_stocks,
         prov_creances,
@@ -356,6 +377,8 @@ pub fn run() {
             delete_company,
             get_active_company,
             set_active_company,
+            get_actif_amorts,
+            set_actif_amort,
             get_dettes_par_age,
             set_dette_age,
             set_retraitement_values,

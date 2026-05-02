@@ -173,6 +173,138 @@ function DettesParAge({
   );
 }
 
+// ── Sub-component: Journal de retraitement ───────────────────────────────────
+
+function JournalRetraitement({
+  bf,
+}: {
+  bf: BilanFonctionnelData;
+}) {
+  const groups = [
+    {
+      debitAccount: "28",
+      creditAccount: "116",
+      libelle: "Amortissements des Immobilisations (Actif Non Courant)",
+      amount: bf.amort_anc,
+    },
+    {
+      debitAccount: "49",
+      creditAccount: "116",
+      libelle: "Provisions pour dépréciation des Créances",
+      amount: bf.prov_creances,
+    },
+    {
+      debitAccount: "39",
+      creditAccount: "116",
+      libelle: "Provisions pour dépréciation des Stocks",
+      amount: bf.prov_stocks,
+    },
+  ];
+
+  const totalDr = groups.reduce((s, g) => s + (isFinite(g.amount) ? g.amount : 0), 0);
+  const hasData = totalDr > 0;
+
+  return (
+    <div className="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-100 dark:border-slate-700 overflow-hidden">
+      <div className="bg-violet-600 px-5 py-3 flex items-center gap-2">
+        <span className="text-white text-base">📒</span>
+        <h3 className="text-white font-bold text-sm tracking-wide">
+          Journal de retraitement — {bf.year}
+        </h3>
+        <span className="text-xs text-violet-200 ml-1">
+          (calculé automatiquement depuis la colonne Amort./Dép. de l'onglet ACTIF)
+        </span>
+        {hasData && (
+          <span className="ml-auto text-xs bg-white/20 text-white rounded-full px-2 py-0.5">
+            ✓ Équilibré
+          </span>
+        )}
+      </div>
+
+      {!hasData && (
+        <div className="p-5 text-center text-slate-500 dark:text-slate-400 text-sm italic">
+          Aucune donnée. Rendez-vous dans l'onglet <strong>Actif</strong> et renseignez les montants
+          dans le tableau <em>«&nbsp;Amortissements &amp; Provisions Cumulés&nbsp;»</em> en bas de page.
+        </div>
+      )}
+
+      {hasData && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm border-collapse">
+            <thead>
+              <tr className="bg-slate-50 dark:bg-slate-700 border-b border-slate-200 dark:border-slate-600">
+                <th colSpan={2} className="text-center py-2 px-3 font-semibold text-slate-600 dark:text-slate-300 border-r border-slate-200 dark:border-slate-600">
+                  Comptes
+                </th>
+                <th className="text-left py-2 px-3 font-semibold text-slate-600 dark:text-slate-300 border-r border-slate-200 dark:border-slate-600">
+                  Libellé
+                </th>
+                <th colSpan={2} className="text-center py-2 px-3 font-semibold text-slate-600 dark:text-slate-300">
+                  Montants
+                </th>
+              </tr>
+              <tr className="bg-slate-50 dark:bg-slate-700 border-b-2 border-slate-300 dark:border-slate-500">
+                <th className="text-center py-1.5 px-3 font-medium text-slate-500 dark:text-slate-400 border-r border-slate-200 dark:border-slate-600 w-16">Débit</th>
+                <th className="text-center py-1.5 px-3 font-medium text-slate-500 dark:text-slate-400 border-r border-slate-200 dark:border-slate-600 w-16">Crédit</th>
+                <th className="py-1.5 px-3 border-r border-slate-200 dark:border-slate-600" />
+                <th className="text-right py-1.5 px-3 font-medium text-slate-500 dark:text-slate-400 border-r border-slate-200 dark:border-slate-600 w-40">Débit</th>
+                <th className="text-right py-1.5 px-3 font-medium text-slate-500 dark:text-slate-400 w-40">Crédit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {groups.map((g) => (
+                <>
+                  {/* Debit line */}
+                  <tr key={`${g.debitAccount}-dr`} className="border-b border-slate-100 dark:border-slate-700/60 bg-white dark:bg-slate-800">
+                    <td className="text-center py-2 px-3 font-mono font-semibold text-violet-700 dark:text-violet-400 border-r border-slate-100 dark:border-slate-700">
+                      {g.debitAccount}
+                    </td>
+                    <td className="border-r border-slate-100 dark:border-slate-700" />
+                    <td className="py-2 px-3 border-r border-slate-100 dark:border-slate-700 text-slate-700 dark:text-slate-300">
+                      Retraitement – {g.libelle}
+                    </td>
+                    <td className="py-2 px-3 text-right font-mono text-slate-800 dark:text-slate-200 border-r border-slate-100 dark:border-slate-700">
+                      {g.amount > 0 ? fmt(g.amount) : "—"}
+                    </td>
+                    <td />
+                  </tr>
+                  {/* Credit line */}
+                  <tr key={`${g.debitAccount}-cr`} className="border-b border-slate-100 dark:border-slate-700/60 bg-slate-50/60 dark:bg-slate-800/40">
+                    <td className="border-r border-slate-100 dark:border-slate-700" />
+                    <td className="text-center py-2 px-3 font-mono font-semibold text-violet-700 dark:text-violet-400 border-r border-slate-100 dark:border-slate-700">
+                      {g.creditAccount}
+                    </td>
+                    <td className="py-2 px-3 pl-8 italic border-r border-slate-100 dark:border-slate-700 text-slate-600 dark:text-slate-400">
+                      Retraitement – {g.libelle}
+                    </td>
+                    <td className="border-r border-slate-100 dark:border-slate-700" />
+                    <td className="py-2 px-3 text-right font-mono text-slate-800 dark:text-slate-200">
+                      {g.amount > 0 ? fmt(g.amount) : "—"}
+                    </td>
+                  </tr>
+                </>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="bg-violet-600">
+                <td colSpan={3} className="py-2.5 px-3 font-bold text-white border-r border-violet-500">
+                  Total journal
+                </td>
+                <td className="py-2.5 px-3 text-right font-mono font-bold text-white border-r border-violet-500">
+                  {fmt(totalDr)}
+                </td>
+                <td className="py-2.5 px-3 text-right font-mono font-bold text-white">
+                  {fmt(totalDr)}
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Sub-component: Bilan Fonctionnel Table ────────────────────────────────────
 
 function BFTable({ bf }: { bf: BilanFonctionnelData }) {
@@ -382,12 +514,12 @@ export default function BilanFonctionnel({ companySwitchKey }: Props) {
       {/* Bilan Fonctionnel table */}
       {bf && (
         <>
+          {/* Journal de retraitement */}
+          <JournalRetraitement bf={bf} />
+
           <div className="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-100 dark:border-slate-700 p-5">
             <h3 className="text-sm font-semibold text-slate-700 dark:text-white mb-4 flex items-center gap-2">
               <span>⚖️</span> Bilan Fonctionnel — {bf.year}
-              <span className="text-xs font-normal text-slate-500 dark:text-slate-400 ml-1">
-                (retraitements automatisés : amort. immo {fmt(bf.amort_anc)} · prov. stocks {fmt(bf.prov_stocks)} · prov. créances {fmt(bf.prov_creances)})
-              </span>
             </h3>
             <BFTable bf={bf} />
           </div>
