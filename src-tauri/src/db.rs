@@ -620,7 +620,7 @@ pub fn set_amort(
 
 /// Returns (amort_anc, prov_stocks, prov_creances) computed from financial_amorts.
 /// Falls back to the old retraitements table if no amort data has been entered yet.
-pub fn get_amorts_for_journal(conn: &Connection, company_id: i64, year: i32) -> rusqlite::Result<(f64, f64, f64)> {
+pub fn get_amorts_for_journal(conn: &Connection, company_id: i64, year: i32) -> rusqlite::Result<(f64, f64, f64, f64)> {
     let map = get_amorts(conn, company_id, year)?;
     let imm_incorp = map.get("imm_incorp").copied().unwrap_or(0.0);
     let imm_corp   = map.get("imm_corp").copied().unwrap_or(0.0);
@@ -630,10 +630,11 @@ pub fn get_amorts_for_journal(conn: &Connection, company_id: i64, year: i32) -> 
 
     // If at least one value was entered in financial_amorts, use it exclusively
     if amort_anc > 0.0 || prov_stk > 0.0 || prov_cr > 0.0 {
-        return Ok((amort_anc, prov_stk, prov_cr));
+        return Ok((imm_incorp, imm_corp, prov_stk, prov_cr));
     }
-    // Fallback: read from old retraitements table
-    get_retraitements(conn, company_id, year)
+    // Fallback: read from old retraitements table (combined amort → put into imm_incorp)
+    let (amort_anc_fb, prov_stk_fb, prov_cr_fb) = get_retraitements(conn, company_id, year)?;
+    Ok((amort_anc_fb, 0.0, prov_stk_fb, prov_cr_fb))
 }
 
 // ─── Retraitements ───────────────────────────────────────────────────────────

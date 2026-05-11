@@ -279,8 +279,9 @@ fn get_bilan_fonctionnel(year: i32) -> Result<BilanFonctionnel, String> {
     let company_id = db::get_active_company_id(&conn).map_err(|e| e.to_string())?;
 
     // Get retraitements — auto-computed from financial_amorts entered in the ACTIF tab
-    let (amort_anc, prov_stocks, prov_creances) =
+    let (amort_incorp, amort_corp, prov_stocks, prov_creances) =
         db::get_amorts_for_journal(&conn, company_id, year).map_err(|e| e.to_string())?;
+    let amort_anc = amort_incorp + amort_corp;
 
     // ACTIF values (NET from DB)
     let total_anc      = compute::get_entry_value("total_anc",    year, company_id, &conn);
@@ -302,7 +303,6 @@ fn get_bilan_fonctionnel(year: i32) -> Result<BilanFonctionnel, String> {
     // PASSIF values
     let total_cp   = compute::get_entry_value("total_cp",   year, company_id, &conn);
     let total_pnc  = compute::get_entry_value("total_pnc",  year, company_id, &conn);
-    let tres_passif = compute::get_entry_value("tres_passif", year, company_id, &conn);
 
     // Dettes par âge
     let dettes_rows = db::get_dettes_par_age_rows(&conn, company_id, year).map_err(|e| e.to_string())?;
@@ -311,9 +311,14 @@ fn get_bilan_fonctionnel(year: i32) -> Result<BilanFonctionnel, String> {
 
     // DLMT = PNC (provisions LT + emprunts) + dettes >1 an from dettes par âge
     let dlmt = total_pnc + total_plus_1_an;
-    // DCT  = dettes <1 an + trésorerie passif
-    let dct  = total_moins_1_an + tres_passif;
-    let total_passif_bf = total_cp + dlmt + dct;
+    // DCT  = dettes <1 an only (trésorerie passif is excluded per Bilan Financier rules)
+    let dct  = total_moins_1_an;
+
+    // Capitaux Propres retraités = CP + all journal restatement entries (crédits au compte 116)
+    // Formula: CP + Amort INCOR + Amort COR + Prov créances + Prov stocks
+    let journal_total    = amort_incorp + amort_corp + prov_creances + prov_stocks;
+    let cp_retraite      = total_cp + journal_total;
+    let total_passif_bf  = cp_retraite + dlmt + dct;
 
     let safe = |n: f64, d: f64| if d != 0.0 { n / d * 100.0 } else { 0.0 };
 
@@ -326,14 +331,17 @@ fn get_bilan_fonctionnel(year: i32) -> Result<BilanFonctionnel, String> {
         pct_actifs_fixes:      safe(actifs_fixes,      total_actif_bf),
         pct_actifs_circulants: safe(actifs_circulants, total_actif_bf),
         pct_disponibilites:    safe(disponibilites,    total_actif_bf),
-        capitaux_propres: total_cp,
+        capitaux_propres: cp_retraite,
         dlmt,
         dct,
         total_passif_bf,
-        pct_cp:   safe(total_cp, total_passif_bf),
-        pct_dlmt: safe(dlmt,     total_passif_bf),
-        pct_dct:  safe(dct,      total_passif_bf),
+        pct_cp:   safe(cp_retraite, total_passif_bf),
+        pct_dlmt: safe(dlmt,        total_passif_bf),
+        pct_dct:  safe(dct,         total_passif_bf),
+        total_cp_raw: total_cp,
         // Also expose the breakdown for display
+        amort_incorp,
+        amort_corp,
         amort_anc,
         prov_stocks,
         prov_creances,

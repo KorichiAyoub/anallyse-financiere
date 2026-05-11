@@ -87,20 +87,23 @@ export default function ImportExport({ sheet, data, onImportDone }: Props) {
               if (year) break;
             }
           }
+          // Fallback: use last year known by the app
+          if (!year && data?.years?.length) {
+            year = data.years[data.years.length - 1];
+          }
           if (!year) continue;
 
           // Find column indices: col 0 = label, col 1 = Brut, col 2 = Amort, col 3 = Net
           let amortCol = 2, netCol = 3;
           for (let ci = 0; ci < headerRow.length; ci++) {
             const h = String(headerRow[ci] ?? "").toLowerCase();
-            if (h.includes("amort") || h.includes("prov")) amortCol = ci;
+            if (h.includes("amort") || h.includes("prov") || h.includes("dép")) amortCol = ci;
             else if (h.startsWith("net")) netCol = ci;
           }
 
           const importRows: ImportRow[] = [];
-          let amortAnc = 0;
-          let provStocks = 0;
-          let provCreances = 0;
+          // Collect per-key amort values (first-match-wins to avoid double-counting sections + children)
+          const amortByKey: Record<string, number> = {};
 
           const parseNum = (v: unknown): number | null => {
             if (v === null || v === undefined || v === "") return null;
@@ -113,33 +116,48 @@ export default function ImportExport({ sheet, data, onImportDone }: Props) {
             const label = String(row[0] ?? "").trim();
             if (!label) continue;
 
-            const netVal = parseNum(row[netCol]);
+            const netVal  = parseNum(row[netCol]);
             const amortVal = parseNum(row[amortCol]) ?? 0;
 
-            // Store NET for all rows (leaf entries will match by label)
+            // Store NET for all rows
             if (netVal !== null) {
               importRows.push({ label, year, value: netVal });
             }
 
-            // Automated retraitement: collect amortissements by section
-            const lc = label.toLowerCase();
-            if (lc.includes("total actif non courant") || lc.includes("total anc")) {
-              amortAnc = amortVal;
-            } else if (lc.startsWith("stocks")) {
-              provStocks = amortVal;
-            } else if (lc.includes("créances") && !lc.includes("autres créances")) {
-              provCreances = amortVal;
+            if (amortVal === 0) continue;
+
+            // Normalize: lowercase + strip accents
+            const norm = label.toLowerCase()
+              .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+            // Map label → amort key (first match wins per key)
+            if (norm.includes("incorporell") && !("imm_incorp" in amortByKey)) {
+              amortByKey["imm_incorp"] = amortVal;
+            } else if (norm.includes("corporell") && !norm.includes("incorporell") && !("imm_corp" in amortByKey)) {
+              amortByKey["imm_corp"] = amortVal;
+            } else if ((norm.startsWith("stocks") || norm === "stocks et encours") && !("stocks" in amortByKey)) {
+              amortByKey["stocks"] = amortVal;
+            } else if (norm.includes("creances") && !norm.includes("autres") && !("creances" in amortByKey)) {
+              amortByKey["creances"] = amortVal;
             }
           }
 
           const count = await invokeTauri<number>("import_values", { rows: importRows, sheetType: targetSheet });
           totalImported += count;
 
-          // Store retraitements (journal automatisé)
-          if (amortAnc > 0 || provStocks > 0 || provCreances > 0) {
-            await invokeTauri("set_retraitement_values", {
-              year, amortAnc, provStocks, provCreances,
-            });
+          // Store per-key amorts in financial_amorts (feeds journal de retraitement)
+          for (const [key, val] of Object.entries(amortByKey)) {
+            if (val >= 0) {
+              await invokeTauri("set_actif_amort", { year, amortKey: key, amort: val });
+            }
+          }
+
+          // Also persist as combined retraitements (backward compat + manual edits)
+          const amortAnc    = (amortByKey["imm_incorp"] ?? 0) + (amortByKey["imm_corp"] ?? 0);
+          const provStocks  = amortByKey["stocks"]   ?? 0;
+          const provCreances = amortByKey["creances"] ?? 0;
+          if (amortAnc + provStocks + provCreances > 0) {
+            await invokeTauri("set_retraitement_values", { year, amortAnc, provStocks, provCreances });
           }
           continue;
         }

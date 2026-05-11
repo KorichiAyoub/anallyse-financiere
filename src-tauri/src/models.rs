@@ -86,7 +86,10 @@ pub struct BilanFonctionnel {
     pub pct_cp: f64,
     pub pct_dlmt: f64,
     pub pct_dct: f64,
+    pub total_cp_raw: f64,   // CP before restatement — 0 signals missing PASSIF data
     // Retraitements used (for transparency)
+    pub amort_incorp: f64,
+    pub amort_corp: f64,
     pub amort_anc: f64,
     pub prov_stocks: f64,
     pub prov_creances: f64,

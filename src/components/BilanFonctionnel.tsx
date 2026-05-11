@@ -30,6 +30,9 @@ interface BilanFonctionnelData {
   pct_cp: number;
   pct_dlmt: number;
   pct_dct: number;
+  total_cp_raw: number;
+  amort_incorp: number;
+  amort_corp: number;
   amort_anc: number;
   prov_stocks: number;
   prov_creances: number;
@@ -177,32 +180,81 @@ function DettesParAge({
 
 function JournalRetraitement({
   bf,
+  onUpdate,
 }: {
   bf: BilanFonctionnelData;
+  onUpdate: () => void;
 }) {
-  const groups = [
-    {
-      debitAccount: "28",
-      creditAccount: "116",
-      libelle: "Amortissements des Immobilisations (Actif Non Courant)",
-      amount: bf.amort_anc,
-    },
-    {
-      debitAccount: "49",
-      creditAccount: "116",
-      libelle: "Provisions pour dépréciation des Créances",
-      amount: bf.prov_creances,
-    },
-    {
-      debitAccount: "39",
-      creditAccount: "116",
-      libelle: "Provisions pour dépréciation des Stocks",
-      amount: bf.prov_stocks,
-    },
+  type EditKey = "amort_incorp" | "amort_corp" | "prov_creances" | "prov_stocks";
+  const [editing, setEditing] = useState<Partial<Record<EditKey, string>>>({});
+  const [saving, setSaving] = useState(false);
+
+  const current = {
+    amort_incorp:  editing.amort_incorp  !== undefined ? parseFloat(editing.amort_incorp)  : bf.amort_incorp,
+    amort_corp:    editing.amort_corp    !== undefined ? parseFloat(editing.amort_corp)    : bf.amort_corp,
+    prov_creances: editing.prov_creances !== undefined ? parseFloat(editing.prov_creances) : bf.prov_creances,
+    prov_stocks:   editing.prov_stocks   !== undefined ? parseFloat(editing.prov_stocks)   : bf.prov_stocks,
+  };
+
+  // Map each edit key to the financial_amorts key used in the ACTIF tab
+  const amortKey: Record<EditKey, string> = {
+    amort_incorp:  "imm_incorp",
+    amort_corp:    "imm_corp",
+    prov_creances: "creances",
+    prov_stocks:   "stocks",
+  };
+
+  const save = async (field: EditKey, rawVal: string) => {
+    const parsed = parseFloat(rawVal.replace(/\s/g, "").replace(",", "."));
+    const value = isNaN(parsed) || parsed < 0 ? 0 : parsed;
+    setSaving(true);
+    try {
+      await invokeTauri("set_actif_amort", { year: bf.year, amortKey: amortKey[field], amort: value });
+      onUpdate();
+    } finally {
+      setSaving(false);
+      setEditing((p) => { const n = { ...p }; delete n[field]; return n; });
+    }
+  };
+
+  interface Group {
+    field:         EditKey;
+    debitAccount:  string;
+    creditAccount: string;
+    libelle:       string;
+    amount:        number;
+  }
+
+  const groups: Group[] = [
+    { field: "amort_incorp",  debitAccount: "28", creditAccount: "116", libelle: "Retraitement dotations aux amortissements IMMO INCOR", amount: current.amort_incorp },
+    { field: "amort_corp",    debitAccount: "28", creditAccount: "116", libelle: "Retraitement dotations aux amortissements IMMO COR",   amount: current.amort_corp },
+    { field: "prov_creances", debitAccount: "48", creditAccount: "116", libelle: "Retraitement Provisions sur créance",                  amount: current.prov_creances },
+    { field: "prov_stocks",   debitAccount: "39", creditAccount: "116", libelle: "Retraitement des stocks",                             amount: current.prov_stocks },
   ];
 
-  const totalDr = groups.reduce((s, g) => s + (isFinite(g.amount) ? g.amount : 0), 0);
-  const hasData = totalDr > 0;
+  const totalDr = groups.reduce((s, g) => s + (isNaN(g.amount) ? 0 : g.amount), 0);
+
+  const AmountInput = ({ group }: { group: Group }) => {
+    const editVal = editing[group.field];
+    const displayVal = editVal !== undefined ? editVal : (group.amount > 0 ? String(group.amount) : "");
+    return (
+      <input
+        type="text"
+        className={`w-40 text-right font-mono px-2 py-1 rounded border text-sm focus:outline-none focus:ring-2 focus:ring-violet-400 ${
+          saving
+            ? "bg-yellow-50 dark:bg-yellow-900/20 border-yellow-300"
+            : "bg-violet-50 dark:bg-violet-900/20 border-violet-200 dark:border-violet-800 text-violet-900 dark:text-violet-200"
+        }`}
+        value={displayVal}
+        placeholder="0"
+        onChange={(e) => setEditing((p) => ({ ...p, [group.field]: e.target.value }))}
+        onFocus={(e) => { setEditing((p) => ({ ...p, [group.field]: group.amount > 0 ? String(group.amount) : "" })); e.target.select(); }}
+        onBlur={(e) => save(group.field, e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+        title="Cliquer pour modifier"
+      />
+    );
+  };
 
   return (
     <div className="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-100 dark:border-slate-700 overflow-hidden">
@@ -211,96 +263,104 @@ function JournalRetraitement({
         <h3 className="text-white font-bold text-sm tracking-wide">
           Journal de retraitement — {bf.year}
         </h3>
-        <span className="text-xs text-violet-200 ml-1">
-          (calculé automatiquement depuis la colonne Amort./Dép. de l'onglet ACTIF)
-        </span>
-        {hasData && (
+        <span className="text-xs text-violet-200 ml-1">(saisissable — ou renseignez l'onglet ACTIF)</span>
+        {totalDr > 0 && (
           <span className="ml-auto text-xs bg-white/20 text-white rounded-full px-2 py-0.5">
             ✓ Équilibré
           </span>
         )}
       </div>
 
-      {!hasData && (
-        <div className="p-5 text-center text-slate-500 dark:text-slate-400 text-sm italic">
-          Aucune donnée. Rendez-vous dans l'onglet <strong>Actif</strong> et renseignez les montants
-          dans le tableau <em>«&nbsp;Amortissements &amp; Provisions Cumulés&nbsp;»</em> en bas de page.
-        </div>
-      )}
-
-      {hasData && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm border-collapse">
-            <thead>
-              <tr className="bg-slate-50 dark:bg-slate-700 border-b border-slate-200 dark:border-slate-600">
-                <th colSpan={2} className="text-center py-2 px-3 font-semibold text-slate-600 dark:text-slate-300 border-r border-slate-200 dark:border-slate-600">
-                  Comptes
-                </th>
-                <th className="text-left py-2 px-3 font-semibold text-slate-600 dark:text-slate-300 border-r border-slate-200 dark:border-slate-600">
-                  Libellé
-                </th>
-                <th colSpan={2} className="text-center py-2 px-3 font-semibold text-slate-600 dark:text-slate-300">
-                  Montants
-                </th>
-              </tr>
-              <tr className="bg-slate-50 dark:bg-slate-700 border-b-2 border-slate-300 dark:border-slate-500">
-                <th className="text-center py-1.5 px-3 font-medium text-slate-500 dark:text-slate-400 border-r border-slate-200 dark:border-slate-600 w-16">Débit</th>
-                <th className="text-center py-1.5 px-3 font-medium text-slate-500 dark:text-slate-400 border-r border-slate-200 dark:border-slate-600 w-16">Crédit</th>
-                <th className="py-1.5 px-3 border-r border-slate-200 dark:border-slate-600" />
-                <th className="text-right py-1.5 px-3 font-medium text-slate-500 dark:text-slate-400 border-r border-slate-200 dark:border-slate-600 w-40">Débit</th>
-                <th className="text-right py-1.5 px-3 font-medium text-slate-500 dark:text-slate-400 w-40">Crédit</th>
-              </tr>
-            </thead>
-            <tbody>
-              {groups.map((g) => (
-                <>
-                  {/* Debit line */}
-                  <tr key={`${g.debitAccount}-dr`} className="border-b border-slate-100 dark:border-slate-700/60 bg-white dark:bg-slate-800">
-                    <td className="text-center py-2 px-3 font-mono font-semibold text-violet-700 dark:text-violet-400 border-r border-slate-100 dark:border-slate-700">
-                      {g.debitAccount}
-                    </td>
-                    <td className="border-r border-slate-100 dark:border-slate-700" />
-                    <td className="py-2 px-3 border-r border-slate-100 dark:border-slate-700 text-slate-700 dark:text-slate-300">
-                      Retraitement – {g.libelle}
-                    </td>
-                    <td className="py-2 px-3 text-right font-mono text-slate-800 dark:text-slate-200 border-r border-slate-100 dark:border-slate-700">
-                      {g.amount > 0 ? fmt(g.amount) : "—"}
-                    </td>
-                    <td />
-                  </tr>
-                  {/* Credit line */}
-                  <tr key={`${g.debitAccount}-cr`} className="border-b border-slate-100 dark:border-slate-700/60 bg-slate-50/60 dark:bg-slate-800/40">
-                    <td className="border-r border-slate-100 dark:border-slate-700" />
-                    <td className="text-center py-2 px-3 font-mono font-semibold text-violet-700 dark:text-violet-400 border-r border-slate-100 dark:border-slate-700">
-                      {g.creditAccount}
-                    </td>
-                    <td className="py-2 px-3 pl-8 italic border-r border-slate-100 dark:border-slate-700 text-slate-600 dark:text-slate-400">
-                      Retraitement – {g.libelle}
-                    </td>
-                    <td className="border-r border-slate-100 dark:border-slate-700" />
-                    <td className="py-2 px-3 text-right font-mono text-slate-800 dark:text-slate-200">
-                      {g.amount > 0 ? fmt(g.amount) : "—"}
-                    </td>
-                  </tr>
-                </>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr className="bg-violet-600">
-                <td colSpan={3} className="py-2.5 px-3 font-bold text-white border-r border-violet-500">
-                  Total journal
-                </td>
-                <td className="py-2.5 px-3 text-right font-mono font-bold text-white border-r border-violet-500">
-                  {fmt(totalDr)}
-                </td>
-                <td className="py-2.5 px-3 text-right font-mono font-bold text-white">
-                  {fmt(totalDr)}
-                </td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-      )}
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm border-collapse">
+          <thead>
+            <tr className="bg-slate-50 dark:bg-slate-700 border-b border-slate-200 dark:border-slate-600">
+              <th colSpan={2} className="text-center py-2 px-3 font-semibold text-slate-600 dark:text-slate-300 border-r border-slate-200 dark:border-slate-600">
+                Comptes
+              </th>
+              <th className="text-left py-2 px-3 font-semibold text-slate-600 dark:text-slate-300 border-r border-slate-200 dark:border-slate-600">
+                Libellé
+              </th>
+              <th colSpan={2} className="text-center py-2 px-3 font-semibold text-slate-600 dark:text-slate-300">
+                Montants
+              </th>
+            </tr>
+            <tr className="bg-slate-50 dark:bg-slate-700 border-b-2 border-slate-300 dark:border-slate-500">
+              <th className="text-center py-1.5 px-3 font-medium text-slate-500 dark:text-slate-400 border-r border-slate-200 dark:border-slate-600 w-16">Débit</th>
+              <th className="text-center py-1.5 px-3 font-medium text-slate-500 dark:text-slate-400 border-r border-slate-200 dark:border-slate-600 w-16">Crédit</th>
+              <th className="py-1.5 px-3 border-r border-slate-200 dark:border-slate-600" />
+              <th className="text-right py-1.5 px-3 font-medium text-slate-500 dark:text-slate-400 border-r border-slate-200 dark:border-slate-600 w-44">Débit</th>
+              <th className="text-right py-1.5 px-3 font-medium text-slate-500 dark:text-slate-400 w-44">Crédit</th>
+            </tr>
+          </thead>
+          <tbody>
+            {groups.map((g) => (
+              <>
+                {/* Debit line */}
+                <tr key={`${g.field}-dr`} className="border-b border-slate-100 dark:border-slate-700/60 bg-white dark:bg-slate-800">
+                  <td className="text-center py-2 px-3 font-mono font-semibold text-violet-700 dark:text-violet-400 border-r border-slate-100 dark:border-slate-700">
+                    {g.debitAccount}
+                  </td>
+                  <td className="border-r border-slate-100 dark:border-slate-700" />
+                  <td className="py-2 px-3 border-r border-slate-100 dark:border-slate-700 text-slate-700 dark:text-slate-300">
+                    {g.libelle}
+                  </td>
+                  <td className="py-1 px-2 border-r border-slate-100 dark:border-slate-700">
+                    <AmountInput group={g} />
+                  </td>
+                  <td />
+                </tr>
+                {/* Credit line */}
+                <tr key={`${g.field}-cr`} className="border-b border-slate-100 dark:border-slate-700/60 bg-slate-50/60 dark:bg-slate-800/40">
+                  <td className="border-r border-slate-100 dark:border-slate-700" />
+                  <td className="text-center py-2 px-3 font-mono font-semibold text-violet-700 dark:text-violet-400 border-r border-slate-100 dark:border-slate-700">
+                    {g.creditAccount}
+                  </td>
+                  <td className="py-2 px-3 pl-8 italic border-r border-slate-100 dark:border-slate-700 text-slate-600 dark:text-slate-400">
+                    {g.libelle}
+                  </td>
+                  <td className="border-r border-slate-100 dark:border-slate-700" />
+                  <td className="py-2 px-3 text-right font-mono text-slate-800 dark:text-slate-200">
+                    {!isNaN(g.amount) && g.amount > 0 ? fmt(g.amount) : "—"}
+                  </td>
+                </tr>
+              </>
+            ))}
+            {/* Autres retraitements d'actif — toujours à 0 */}
+            <tr className="border-b border-slate-100 dark:border-slate-700/60 bg-white dark:bg-slate-800">
+              <td className="border-r border-slate-100 dark:border-slate-700" />
+              <td className="border-r border-slate-100 dark:border-slate-700" />
+              <td className="py-2 px-3 border-r border-slate-100 dark:border-slate-700 text-slate-500 dark:text-slate-400 italic">
+                Autres retraitements d'actif
+              </td>
+              <td className="py-2 px-3 border-r border-slate-100 dark:border-slate-700 text-right font-mono text-slate-400">0</td>
+              <td />
+            </tr>
+            <tr className="border-b border-slate-100 dark:border-slate-700/60 bg-slate-50/60 dark:bg-slate-800/40">
+              <td className="border-r border-slate-100 dark:border-slate-700" />
+              <td className="border-r border-slate-100 dark:border-slate-700" />
+              <td className="py-2 px-3 pl-8 italic border-r border-slate-100 dark:border-slate-700 text-slate-500 dark:text-slate-400 italic">
+                Autres retraitements d'actif
+              </td>
+              <td className="border-r border-slate-100 dark:border-slate-700" />
+              <td className="py-2 px-3 text-right font-mono text-slate-400">—</td>
+            </tr>
+          </tbody>
+          <tfoot>
+            <tr className="bg-violet-600">
+              <td colSpan={3} className="py-2.5 px-3 font-bold text-white border-r border-violet-500">
+                Total journal
+              </td>
+              <td className="py-2.5 px-3 text-right font-mono font-bold text-white border-r border-violet-500">
+                {fmt(totalDr)}
+              </td>
+              <td className="py-2.5 px-3 text-right font-mono font-bold text-white">
+                {fmt(totalDr)}
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
     </div>
   );
 }
@@ -392,15 +452,15 @@ function BFHistogram({ bf }: { bf: BilanFonctionnelData }) {
   const data = [
     {
       name: "ACTIF",
-      "Actifs Fixes": bf.actifs_fixes / M,
-      "Actifs Circulants": bf.actifs_circulants / M,
       "Disponibilités": bf.disponibilites / M,
+      "Actifs Circulants": bf.actifs_circulants / M,
+      "Actifs Fixes": bf.actifs_fixes / M,
     },
     {
       name: "PASSIF",
-      "Capitaux Propres": bf.capitaux_propres / M,
-      "D.L.M.T.": bf.dlmt / M,
       "D.C.T.": bf.dct / M,
+      "D.L.M.T.": bf.dlmt / M,
+      "Capitaux Propres": bf.capitaux_propres / M,
     },
   ];
 
@@ -416,14 +476,14 @@ function BFHistogram({ bf }: { bf: BilanFonctionnelData }) {
           <YAxis tickFormatter={(v) => `${v}M`} tick={{ fontSize: 11 }} />
           <Tooltip formatter={(v) => [`${Number(v ?? 0).toFixed(2)} M DA`]} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
-          {/* ACTIF bars */}
-          <Bar dataKey="Actifs Fixes" fill="#3b82f6" radius={[4, 4, 0, 0]} stackId="actif" />
-          <Bar dataKey="Actifs Circulants" fill="#818cf8" radius={[4, 4, 0, 0]} stackId="actif" />
+          {/* ACTIF bars — bottom to top: Disponibilités, Circulants, Fixes */}
           <Bar dataKey="Disponibilités" fill="#06b6d4" radius={[4, 4, 0, 0]} stackId="actif" />
-          {/* PASSIF bars */}
-          <Bar dataKey="Capitaux Propres" fill="#10b981" radius={[4, 4, 0, 0]} stackId="passif" />
-          <Bar dataKey="D.L.M.T." fill="#f97316" radius={[4, 4, 0, 0]} stackId="passif" />
+          <Bar dataKey="Actifs Circulants" fill="#818cf8" radius={[4, 4, 0, 0]} stackId="actif" />
+          <Bar dataKey="Actifs Fixes" fill="#3b82f6" radius={[4, 4, 0, 0]} stackId="actif" />
+          {/* PASSIF bars — bottom to top: DCT, DLMT, CP */}
           <Bar dataKey="D.C.T." fill="#ef4444" radius={[4, 4, 0, 0]} stackId="passif" />
+          <Bar dataKey="D.L.M.T." fill="#f97316" radius={[4, 4, 0, 0]} stackId="passif" />
+          <Bar dataKey="Capitaux Propres" fill="#10b981" radius={[4, 4, 0, 0]} stackId="passif" />
         </BarChart>
       </ResponsiveContainer>
     </div>
@@ -514,8 +574,24 @@ export default function BilanFonctionnel({ companySwitchKey }: Props) {
       {/* Bilan Fonctionnel table */}
       {bf && (
         <>
+          {/* Warning: PASSIF data missing */}
+          {bf.total_cp_raw === 0 && (
+            <div className="flex items-start gap-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-xl p-4">
+              <span className="text-amber-500 text-lg mt-0.5">⚠️</span>
+              <div>
+                <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+                  Données PASSIF manquantes pour {bf.year}
+                </p>
+                <p className="text-sm text-amber-700 dark:text-amber-400 mt-0.5">
+                  Les D.L.M.T et D.C.T affichent 0 car aucune valeur n'a été saisie dans le
+                  bilan PASSIF (capitaux propres, emprunts, fournisseurs…) pour cet exercice.
+                  Veuillez renseigner l'onglet <strong>PASSIF</strong> avant de consulter ce bilan.
+                </p>
+              </div>
+            </div>
+          )}
           {/* Journal de retraitement */}
-          <JournalRetraitement bf={bf} />
+          <JournalRetraitement bf={bf} onUpdate={handleDettesUpdate} />
 
           <div className="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-100 dark:border-slate-700 p-5">
             <h3 className="text-sm font-semibold text-slate-700 dark:text-white mb-4 flex items-center gap-2">
