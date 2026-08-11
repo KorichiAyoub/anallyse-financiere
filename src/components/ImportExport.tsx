@@ -1,7 +1,8 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import { open } from "@tauri-apps/plugin-dialog";
 import { SheetData, SheetType, ImportRow } from "../types";
 import { flattenTree, buildTree } from "../hooks/useFinancialData";
 import { invokeTauri, isTauriRuntime } from "../lib/tauri";
@@ -21,7 +22,6 @@ function detectSheetType(sheetName: string): string | null {
 }
 
 export default function ImportExport({ sheet, data, onImportDone }: Props) {
-  const fileRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const tauriMode = isTauriRuntime();
@@ -31,19 +31,32 @@ export default function ImportExport({ sheet, data, onImportDone }: Props) {
     return invokeTauri<string>("save_file", { filename, data: Array.from(bytes) });
   };
 
-  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImport = async () => {
     if (!tauriMode) {
       setStatus("Mode navigateur: import indisponible (utilisez l'app desktop Tauri).");
       return;
     }
 
-    const file = e.target.files?.[0];
-    if (!file) return;
+    // Native dialog instead of <input type="file">: WebView2 (Windows) never
+    // opens a picker for the HTML input, so the button appeared to do nothing.
+    let selected: string | null;
+    try {
+      selected = (await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Excel", extensions: ["xlsx", "xls"] }],
+      })) as string | null;
+    } catch (err) {
+      setStatus(`Erreur ouverture du sélecteur: ${err}`);
+      return;
+    }
+    if (!selected) return; // user cancelled
+
     setBusy(true);
     setStatus(null);
     try {
-      const ab = await file.arrayBuffer();
-      const wb = XLSX.read(ab, { type: "array" });
+      const bytes = await invokeTauri<number[]>("read_file_bytes", { path: selected });
+      const wb = XLSX.read(Uint8Array.from(bytes), { type: "array" });
 
       let totalImported = 0;
       for (const sheetName of wb.SheetNames) {
@@ -200,7 +213,6 @@ export default function ImportExport({ sheet, data, onImportDone }: Props) {
       setStatus(`Erreur: ${err}`);
     } finally {
       setBusy(false);
-      if (fileRef.current) fileRef.current.value = "";
     }
   };
 
@@ -297,15 +309,8 @@ export default function ImportExport({ sheet, data, onImportDone }: Props) {
 
   return (
     <div className="flex items-center gap-3 flex-wrap">
-      <input
-        ref={fileRef}
-        type="file"
-        accept=".xlsx,.xls"
-        className="hidden"
-        onChange={handleImport}
-      />
       <button
-        onClick={() => fileRef.current?.click()}
+        onClick={handleImport}
         disabled={busy || !tauriMode}
         className="flex items-center gap-1 px-3 py-1.5 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700 disabled:opacity-50"
       >

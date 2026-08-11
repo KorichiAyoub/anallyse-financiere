@@ -133,6 +133,13 @@ fn save_file(app: tauri::AppHandle, filename: String, data: Vec<u8>) -> Result<S
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Read a file chosen by the user through the native dialog.
+/// Needed because `<input type="file">` never opens a picker in WebView2 (Windows).
+#[tauri::command]
+fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
+    std::fs::read(&path).map_err(|e| format!("Lecture de {path} impossible: {e}"))
+}
+
 // ─── PIN Commands ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -354,6 +361,7 @@ fn get_bilan_fonctionnel(year: i32) -> Result<BilanFonctionnel, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -374,6 +382,7 @@ pub fn run() {
             add_year,
             import_values,
             save_file,
+            read_file_bytes,
             has_pin,
             setup_pin,
             verify_pin,
